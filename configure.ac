@@ -71,7 +71,19 @@ AC_ERLANG_CHECK_LIB([mnesia], [], [AC_MSG_ERROR([mnesia was not found!])])
 AC_ERLANG_CHECK_LIB([compiler], [], [AC_MSG_ERROR([compiler was not found!])])
 AC_ERLANG_CHECK_LIB([inets], [], [AC_MSG_ERROR([inets was not found!])])
 AC_ERLANG_CHECK_LIB([snmp], [], [AC_MSG_ERROR([snmp was not found!])])
-AC_ERLANG_CHECK_LIB([sigscale_mibs], [], [AC_MSG_ERROR([sigscale_mibs was not found!])])
+## The MIB is compiled against the enterprise root sigscale_mibs
+## carries, so that package is needed to build it -- and only to build
+## it.  m3ua_mib loads an already compiled MIB at run time and the rest
+## of the application never mentions it.  Where it is absent everything
+## else is built, the MIB is not, and the release does not list it.
+AC_ERLANG_CHECK_LIB([sigscale_mibs], [have_sigscale_mibs=yes],
+		[have_sigscale_mibs=no
+		AC_MSG_WARN([sigscale_mibs was not found: the SNMP MIB will not be built])])
+AM_CONDITIONAL([HAVE_SIGSCALE_MIBS], [test "x$have_sigscale_mibs" = "xyes"])
+AS_IF([test "x$have_sigscale_mibs" = "xyes"],
+		[sigscale_mibs_rel="{sigscale_mibs, \"$ERLANG_LIB_VER_sigscale_mibs\"},"],
+		[sigscale_mibs_rel=""])
+AC_SUBST(sigscale_mibs_rel)
 
 
 ##

@@ -8,7 +8,8 @@ mibs_DATA = SIGSCALE-M3UA-MIB.mib
 check_DATA = .tree_ok
 
 .tree_ok:
-	@if snmptranslate -V > /dev/null 2>&1; then \
+	@if test -n "$(ERLANG_LIB_DIR_sigscale_mibs)" \
+			&& snmptranslate -V > /dev/null 2>&1; then \
 		snmptranslate -M +$(ERLANG_LIB_DIR_sigscale_mibs)/mibs:$(top_srcdir)/mibs \
 			-m +SIGSCALE-M3UA-MIB -Lo -Tp -IR m3uaMIB; \
 	fi
