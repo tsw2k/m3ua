@@ -74,11 +74,19 @@ sequences() ->
 %% Returns a list of all test cases in this test suite.
 %%
 all() ->
-	[asp_up, asp_up_ack, asp_down, asp_down_ack, asp_active, asp_active_ack].
+	[asp_up, asp_up_ack, asp_down, asp_down_ack, asp_active, asp_active_ack,
+			duna, dupu, scon].
 
 %%---------------------------------------------------------------------
 %%  Test cases
 %%---------------------------------------------------------------------
+
+%% The SSNM cases below assert the octets by hand rather than only that
+%% a value survives encoding and decoding.  A round trip against our own
+%% codec passes whether or not the fields are in the order the protocol
+%% puts them in: the encoder and the decoder agree with each other and
+%% disagree with every other implementation.  The octets come from the
+%% diagrams in RFC 4666 3.4.
 asp_up() ->
 	[{userdata, [{doc, "ASP UP Message encoding and decoding"}]}].
 	
@@ -166,3 +174,56 @@ asp_active_ack(_Config) ->
 %%  Internal functions
 %%---------------------------------------------------------------------
 
+duna() ->
+	[{userdata, [{doc, "DUNA message encoding, with the Affected Point "
+			"Code parameter checked against RFC 4666 3.4.1"}]}].
+
+duna(_Config) ->
+	APC = 16#0a0b0c,
+	Params = m3ua_codec:parameters([{?AffectedPointCode, [APC]}]),
+	%% Tag 0x0012, length 8, a mask octet of zero and 24 bits of point
+	%% code.
+	<<16#0012:16, 8:16, 0, 16#0a0b0c:24>> = Params,
+	Duna = #m3ua{class = ?SSNMMessage, type = ?SSNMDUNA, params = Params},
+	Bin = m3ua_codec:m3ua(Duna),
+	0 = size(Bin) rem 4,
+	#m3ua{class = ?SSNMMessage, type = ?SSNMDUNA,
+			params = Decoded} = m3ua_codec:m3ua(Bin),
+	%% One parameter, carrying one point code: the affected point codes
+	%% come back grouped by the parameter they arrived in.
+	[[APC]] = m3ua_codec:get_all_parameter(?AffectedPointCode,
+			m3ua_codec:parameters(Decoded)).
+
+dupu() ->
+	[{userdata, [{doc, "DUPU message encoding. RFC 4666 3.4.5 puts the "
+			"unavailability cause first and the MTP3-User identity "
+			"second, and gives the parameter a length of eight"}]}].
+
+dupu(_Config) ->
+	Params = m3ua_codec:parameters([{?UserCause,
+			{sccp, inaccessible_remote_user}}]),
+	%% Tag 0x0204, length 8, cause 2 then user 3.
+	<<16#0204:16, 8:16, 2:16, 3:16>> = Params,
+	Dupu = #m3ua{class = ?SSNMMessage, type = ?SSNMDUPU, params = Params},
+	Bin = m3ua_codec:m3ua(Dupu),
+	0 = size(Bin) rem 4,
+	#m3ua{class = ?SSNMMessage, type = ?SSNMDUPU,
+			params = Decoded} = m3ua_codec:m3ua(Bin),
+	{sccp, inaccessible_remote_user} = m3ua_codec:get_parameter(?UserCause,
+			m3ua_codec:parameters(Decoded), undefined).
+
+scon() ->
+	[{userdata, [{doc, "SCON message encoding. The Congestion "
+			"Indications parameter of RFC 4666 3.4.4 has a tag of its "
+			"own, 0x0205, and is not the Concerned Destination"}]}].
+
+scon(_Config) ->
+	Params = m3ua_codec:parameters([{?CongestionIndications, 2}]),
+	<<16#0205:16, 8:16, 0:24, 2>> = Params,
+	Scon = #m3ua{class = ?SSNMMessage, type = ?SSNMSCON, params = Params},
+	Bin = m3ua_codec:m3ua(Scon),
+	0 = size(Bin) rem 4,
+	#m3ua{class = ?SSNMMessage, type = ?SSNMSCON,
+			params = Decoded} = m3ua_codec:m3ua(Bin),
+	2 = m3ua_codec:get_parameter(?CongestionIndications,
+			m3ua_codec:parameters(Decoded), undefined).

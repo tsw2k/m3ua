@@ -326,6 +326,21 @@
 		Result :: {ok, NewState} | {error, Reason},
 		NewState :: term(),
 		Reason :: term().
+%% Called when a destination audit (DAUD) is received.  An ASP is
+%% asking whether the affected point codes are available.  Only the
+%% signalling gateway knows, so the answer is not sent from here: the
+%% callback is expected to reply with m3ua:duna/3, m3ua:dava/3 or
+%% m3ua:drst/3 as the case may be (RFC 4666 4.4.1.5).
+-callback audit(Stream, RCs, APCs, State) -> Result
+	when
+		Stream :: pos_integer(),
+		RCs :: [RC],
+		RC :: 0..4294967295,
+		APCs :: [APC],
+		APC :: 0..16777215,
+		State :: term(),
+		Result :: {ok, State}.
+
 -callback register(RC, NA, Keys, TMT, State) -> Result
 	when
 		RC :: 0..4294967295,
@@ -369,6 +384,8 @@
 		Active :: true | false | once | pos_integer(),
 		NewState :: term(),
 		Reason :: term().
+-optional_callbacks([audit/4]).
+
 -callback terminate(Reason, State) -> Result
 	when
 		Reason :: term(),
@@ -650,6 +667,52 @@ code_change(_OldVsn, StateName, StateData, _Extra) ->
 %%  internal functions
 %%----------------------------------------------------------------------
 
+-spec audit(CbMod, CbArgs, CbState) -> {ok, CbState}
+	when
+		CbMod :: atom() | #m3ua_fsm_cb{},
+		CbArgs :: [term()],
+		CbState :: term().
+%% @doc Ask the callback about a destination audit, where it wants to
+%% 	be asked.
+%%
+%% 	Optional, and checked rather than assumed: a callback module
+%% 	written before there was an audit callback must go on working, and
+%% 	an audit it does not answer leaves the ASP no worse off than the
+%% 	silence it got before.
+%% @hidden
+audit(CbMod, CbArgs, CbState) when is_atom(CbMod) ->
+	case erlang:function_exported(CbMod, audit, 4) of
+		true ->
+			m3ua_callback:cb(audit, CbMod, CbArgs);
+		false ->
+			case code:ensure_loaded(CbMod) of
+				{module, CbMod} ->
+					case erlang:function_exported(CbMod, audit, 4) of
+						true ->
+							m3ua_callback:cb(audit, CbMod, CbArgs);
+						false ->
+							{ok, CbState}
+					end;
+				{error, _Reason} ->
+					{ok, CbState}
+			end
+	end;
+audit(#m3ua_fsm_cb{} = CbMod, CbArgs, _CbState) ->
+	m3ua_callback:cb(audit, CbMod, CbArgs).
+
+-spec ssnm_count(Type) -> Key
+	when
+		Type :: byte(),
+		Key :: atom().
+%% @doc Statistics key for an SSNM message sent.
+%% @hidden
+ssnm_count(?SSNMDUNA) -> duna_out;
+ssnm_count(?SSNMDAVA) -> dava_out;
+ssnm_count(?SSNMDAUD) -> daud_out;
+ssnm_count(?SSNMSCON) -> scon_out;
+ssnm_count(?SSNMDUPU) -> dupu_out;
+ssnm_count(?SSNMDRST) -> drst_out.
+
 -spec handle_event(EventType :: gen_statem:event_type(),
 		EventContent :: term(), StateName :: atom(),
 		StateData :: #statedata{}) ->
@@ -701,6 +764,25 @@ handle_event(cast, {'M-NOTIFY', AsState, RC}, StateName,
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, NewStateData};
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, NewStateData}
+	end;
+handle_event(cast, {'M-SSNM', Type, Params}, StateName,
+		#statedata{socket = Socket, active = Active, ep = EP,
+		assoc = Assoc, count = Count} = StateData) ->
+	Message = #m3ua{class = ?SSNMMessage, type = Type, params = Params},
+	Packet = m3ua_codec:m3ua(Message),
+	case gen_sctp:send(Socket, Assoc, 0, Packet) of
+		ok ->
+			inet:setopts(Socket, [{active, Active}]),
+			Key = ssnm_count(Type),
+			Out = maps:get(Key, Count, 0),
+			NewCount = maps:put(Key, Out + 1, Count),
+			NewStateData = StateData#statedata{count = NewCount},
+			{next_state, StateName, NewStateData};
+		{error, eagain} ->
+			% @todo flow control
+			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
+		{error, Reason} ->
+			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
 handle_event(cast, {'M-ASP_STATUS', request, Ref, From},
 		StateName, StateData) ->
@@ -1001,6 +1083,21 @@ handle_sgp(#m3ua{class = ?SSNMMessage, type = ?SSNMSCON, params = Params},
 	{ok, NewCbState} = m3ua_callback:cb(status, CbMod, CbArgs),
 	NewStateData = StateData#statedata{cb_state = NewCbState},
 	inet:setopts(Socket, [{active, Active}]),
+	{next_state, StateName, NewStateData};
+handle_sgp(#m3ua{class = ?SSNMMessage, type = ?SSNMDAUD, params = Params},
+		StateName, Stream, #statedata{socket = Socket, active = Active,
+		callback = CbMod, cb_state = CbState, count = Count} = StateData)
+		when CbMod /= undefined ->
+	Parameters = m3ua_codec:parameters(Params),
+	RCs = m3ua_codec:get_parameter(?RoutingContext, Parameters, []),
+	APCs = m3ua_codec:get_all_parameter(?AffectedPointCode, Parameters),
+	CbArgs = [Stream, RCs, APCs, CbState],
+	{ok, NewCbState} = audit(CbMod, CbArgs, CbState),
+	inet:setopts(Socket, [{active, Active}]),
+	DaudIn = maps:get(daud_in, Count, 0),
+	NewCount = maps:put(daud_in, DaudIn + 1, Count),
+	NewStateData = StateData#statedata{cb_state = NewCbState,
+			count = NewCount},
 	{next_state, StateName, NewStateData};
 handle_sgp(#m3ua{class = ?MGMTMessage, type = ?MGMTError, params = Params},
 		StateName, _Stream, #statedata{assoc = Assoc, ep = EP,
