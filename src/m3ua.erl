@@ -29,6 +29,7 @@
 -export([asp_status/2, asp_up/2, asp_down/2, asp_active/2,
 			asp_inactive/2]).
 -export([transfer/9, transfer/10, cast/9]).
+-export([duna/3, dava/3, drst/3, scon/3, scon/5, dupu/5, daud/3]).
 
 %% export the m3ua private API
 -export([sort/1, keymember/4, keymember/5]).
@@ -438,6 +439,156 @@ cast(Fsm, Stream, RC, OPC, DPC, NI, SI, SLS, Data)
 	Params = {Stream, RC, OPC, DPC, NI, SI, SLS, Data},
 	gen_fsm:send_event(Fsm, {'MTP-TRANSFER', request, Ref, self(), Params}),
 	Ref.
+
+-spec duna(Fsm, RCs, APCs) -> ok
+	when
+		Fsm :: pid(),
+		RCs :: [RC],
+		RC :: 0..4294967295,
+		APCs :: [APC],
+		APC :: 0..16777215.
+%% @doc Tell an ASP that SS7 destinations have become unavailable.
+%%
+%% 	The Destination Unavailable (DUNA) message of RFC 4666 3.4.1,
+%% 	which a signalling gateway sends when it can no longer reach the
+%% 	affected point codes. It arrives at the ASP as the MTP-PAUSE
+%% 	indication of its `pause' callback.
+%%
+%% 	`Fsm' is the SGP process of the association to tell, as given to
+%% 	the callback module's init/6.
+duna(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
+	ssnm(Fsm, ?SSNMDUNA, RCs, APCs, []).
+
+-spec dava(Fsm, RCs, APCs) -> ok
+	when
+		Fsm :: pid(),
+		RCs :: [RC],
+		RC :: 0..4294967295,
+		APCs :: [APC],
+		APC :: 0..16777215.
+%% @doc Tell an ASP that SS7 destinations are available again.
+%%
+%% 	The Destination Available (DAVA) message of RFC 4666 3.4.2. It
+%% 	arrives at the ASP as the MTP-RESUME indication of its `resume'
+%% 	callback.
+dava(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
+	ssnm(Fsm, ?SSNMDAVA, RCs, APCs, []).
+
+-spec drst(Fsm, RCs, APCs) -> ok
+	when
+		Fsm :: pid(),
+		RCs :: [RC],
+		RC :: 0..4294967295,
+		APCs :: [APC],
+		APC :: 0..16777215.
+%% @doc Tell an ASP that SS7 destinations are restricted.
+%%
+%% 	The Destination Restricted (DRST) message of RFC 4666 3.4.6,
+%% 	which says the gateway can still reach the affected point codes
+%% 	but would rather the traffic went another way.
+drst(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
+	ssnm(Fsm, ?SSNMDRST, RCs, APCs, []).
+
+-spec scon(Fsm, RCs, APCs) -> ok
+	when
+		Fsm :: pid(),
+		RCs :: [RC],
+		RC :: 0..4294967295,
+		APCs :: [APC],
+		APC :: 0..16777215.
+%% @doc Tell an ASP that the route to SS7 destinations is congested.
+%%
+%% 	The Signalling Congestion (SCON) message of RFC 4666 3.4.4.
+scon(Fsm, RCs, APCs) ->
+	scon(Fsm, RCs, APCs, undefined, undefined).
+
+-spec scon(Fsm, RCs, APCs, ConcernedDPC, CongestionLevel) -> ok
+	when
+		Fsm :: pid(),
+		RCs :: [RC],
+		RC :: 0..4294967295,
+		APCs :: [APC],
+		APC :: 0..16777215,
+		ConcernedDPC :: undefined | 0..16777215,
+		CongestionLevel :: undefined | 0..3.
+%% @doc The same, with the two optional parameters of RFC 4666 3.4.4.
+scon(Fsm, RCs, APCs, ConcernedDPC, CongestionLevel)
+		when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
+	Optional = case ConcernedDPC of
+		undefined ->
+			[];
+		_ ->
+			[{?ConcernedDestination, <<ConcernedDPC:24>>}]
+	end,
+	Optional1 = case CongestionLevel of
+		undefined ->
+			Optional;
+		_ ->
+			[{?CongestionIndications, CongestionLevel} | Optional]
+	end,
+	ssnm(Fsm, ?SSNMSCON, RCs, APCs, Optional1).
+
+-spec dupu(Fsm, RCs, APCs, User, Cause) -> ok
+	when
+		Fsm :: pid(),
+		RCs :: [RC],
+		RC :: 0..4294967295,
+		APCs :: [APC],
+		APC :: 0..16777215,
+		User :: m3ua_codec:mtp3_user(),
+		Cause :: m3ua_codec:mtp3_cause().
+%% @doc Tell an ASP that an MTP3 User Part is unavailable at an SS7
+%% 	destination.
+%%
+%% 	The Destination User Part Unavailable (DUPU) message of RFC 4666
+%% 	3.4.5, which carries the User Part Unavailable of the SS7 network
+%% 	(ITU-T Q.704 15.17) across to the ASP.
+dupu(Fsm, RCs, APCs, User, Cause)
+		when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
+	ssnm(Fsm, ?SSNMDUPU, RCs, APCs, [{?UserCause, {User, Cause}}]).
+
+-spec daud(Fsm, RCs, APCs) -> ok
+	when
+		Fsm :: pid(),
+		RCs :: [RC],
+		RC :: 0..4294967295,
+		APCs :: [APC],
+		APC :: 0..16777215.
+%% @doc Ask a signalling gateway whether SS7 destinations are available.
+%%
+%% 	The Destination State Audit (DAUD) message of RFC 4666 3.4.3, sent
+%% 	by an ASP. The gateway answers with a DUNA, DAVA or DRST for each
+%% 	affected point code (4.4.1.5); it is under no obligation to answer
+%% 	at all, so an ASP that audits should not wait on it.
+%%
+%% 	`Fsm' is the ASP process of the association to ask.
+daud(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
+	ssnm(Fsm, ?SSNMDAUD, RCs, APCs, []).
+
+-spec ssnm(Fsm, Type, RCs, APCs, Optional) -> ok
+	when
+		Fsm :: pid(),
+		Type :: byte(),
+		RCs :: [0..4294967295],
+		APCs :: [0..16777215],
+		Optional :: [{integer(), term()}].
+%% @doc Send one SS7 signalling network management message.
+%%
+%% 	Every one of them names the point codes it is about, and carries
+%% 	the routing contexts where the ASP is registered for more than
+%% 	one (RFC 4666 3.4).
+%% @private
+ssnm(Fsm, Type, RCs, APCs, Optional) ->
+	Params = case RCs of
+		[] ->
+			[];
+		_ ->
+			[{?RoutingContext, RCs}]
+	end,
+	Params1 = [{?AffectedPointCode, APCs} | Params] ++ Optional,
+	gen_fsm:send_all_state_event(Fsm,
+			{'M-SSNM', Type, m3ua_codec:parameters(Params1)}),
+	ok.
 
 -spec get_as() -> Result
 	when
