@@ -238,6 +238,7 @@
 
 -include("m3ua.hrl").
 -include_lib("kernel/include/inet_sctp.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -record(statedata,
 		{socket :: gen_sctp:sctp_socket() | undefined,
@@ -480,7 +481,10 @@ down(timeout, #statedata{ep = EP, assoc = Assoc,
 %% 	gen_fsm:sync_send_event/2,3} in the <b>down</b> state.
 %% @private
 %%
-down({'MTP-TRANSFER', request, _Params}, _From, StateData) ->
+down({'MTP-TRANSFER', request, _Params}, _From,
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	?LOG_NOTICE("MTP-TRANSFER refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_down}),
 	{reply, {error, unexpected_message}, down, StateData}.
 
 -spec inactive(Event :: timeout | term(), StateData :: #statedata{}) ->
@@ -494,7 +498,10 @@ down({'MTP-TRANSFER', request, _Params}, _From, StateData) ->
 %%
 inactive({'M-RK_REG', request, _, _, _, _, _, _, _} = Event, StateData) ->
 	handle_reg(Event, inactive, StateData);
-inactive({'MTP-TRANSFER', request, _Ref, _From, _Params}, StateData) ->
+inactive({'MTP-TRANSFER', request, _Ref, _From, _Params},
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	?LOG_NOTICE("MTP-TRANSFER discarded",
+			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_inactive}),
 	{next_state, inactive, StateData}.
 
 -spec inactive(Event :: timeout | term(),
@@ -507,7 +514,10 @@ inactive({'MTP-TRANSFER', request, _Ref, _From, _Params}, StateData) ->
 %% 	gen_fsm:sync_send_event/2,3} in the <b>inactive</b> state.
 %% @private
 %%
-inactive({'MTP-TRANSFER', request, _Params}, _From, StateData) ->
+inactive({'MTP-TRANSFER', request, _Params}, _From,
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	?LOG_NOTICE("MTP-TRANSFER refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_inactive}),
 	{reply, {error, unexpected_message}, down, StateData}.
 
 -spec active(Event :: timeout | term(), StateData :: #statedata{}) ->
@@ -874,20 +884,22 @@ code_change(_OldVsn, StateName, StateData, _Extra) ->
 %%  internal functions
 %%----------------------------------------------------------------------
 
--spec audit(CbMod, CbArgs, CbState) -> {ok, CbState}
+-spec audit(CbMod, CbArgs, CbState, EP, Assoc) -> {ok, CbState}
 	when
 		CbMod :: atom() | #m3ua_fsm_cb{},
 		CbArgs :: [term()],
-		CbState :: term().
+		CbState :: term(),
+		EP :: pid(),
+		Assoc :: gen_sctp:assoc_id().
 %% @doc Ask the callback about a destination audit, where it wants to
 %% 	be asked.
 %%
 %% 	Optional, and checked rather than assumed: a callback module
-%% 	written before there was an audit callback must go on working, and
-%% 	an audit it does not answer leaves the ASP no worse off than the
-%% 	silence it got before.
+%% 	written before there was an audit callback must go on working. An
+%% 	audit it does not answer goes no further, so it says so rather than
+%% 	leaving the ASP to wonder which of the two happened.
 %% @hidden
-audit(CbMod, CbArgs, CbState) when is_atom(CbMod) ->
+audit(CbMod, CbArgs, CbState, EP, Assoc) when is_atom(CbMod) ->
 	case erlang:function_exported(CbMod, audit, 4) of
 		true ->
 			m3ua_callback:cb(audit, CbMod, CbArgs);
@@ -898,13 +910,19 @@ audit(CbMod, CbArgs, CbState) when is_atom(CbMod) ->
 						true ->
 							m3ua_callback:cb(audit, CbMod, CbArgs);
 						false ->
+							?LOG_NOTICE("DAUD unanswered",
+									#{layer => m3ua, ep => EP, assoc => Assoc,
+									callback => CbMod, reason => no_audit_callback}),
 							{ok, CbState}
 					end;
-				{error, _Reason} ->
+				{error, Reason} ->
+					?LOG_NOTICE("DAUD unanswered",
+							#{layer => m3ua, ep => EP, assoc => Assoc,
+							callback => CbMod, reason => Reason}),
 					{ok, CbState}
 			end
 	end;
-audit(#m3ua_fsm_cb{} = CbMod, CbArgs, _CbState) ->
+audit(#m3ua_fsm_cb{} = CbMod, CbArgs, _CbState, _EP, _Assoc) ->
 	m3ua_callback:cb(audit, CbMod, CbArgs).
 
 -spec ssnm_count(Type) -> Key
@@ -976,6 +994,9 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP, params = Params},
 handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP},
 		inactive, _Stream, #statedata{socket = Socket, active = Active,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
+	?LOG_NOTICE("ASPUP received in the inactive state",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			reason => unexpected_message}),
 	AspUpAck = #m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK},
 	Packet = m3ua_codec:m3ua(AspUpAck),
 	case gen_sctp:send(Socket, Assoc, 0, Packet) of
@@ -1135,13 +1156,14 @@ handle_sgp(#m3ua{class = ?SSNMMessage, type = ?SSNMSCON, params = Params},
 	{next_state, StateName, NewStateData};
 handle_sgp(#m3ua{class = ?SSNMMessage, type = ?SSNMDAUD, params = Params},
 		StateName, Stream, #statedata{socket = Socket, active = Active,
-		callback = CbMod, cb_state = CbState, count = Count} = StateData)
+		callback = CbMod, cb_state = CbState, count = Count,
+		ep = EP, assoc = Assoc} = StateData)
 		when CbMod /= undefined ->
 	Parameters = m3ua_codec:parameters(Params),
 	RCs = m3ua_codec:get_parameter(?RoutingContext, Parameters, []),
 	APCs = m3ua_codec:get_all_parameter(?AffectedPointCode, Parameters),
 	CbArgs = [Stream, RCs, APCs, CbState],
-	{ok, NewCbState} = audit(CbMod, CbArgs, CbState),
+	{ok, NewCbState} = audit(CbMod, CbArgs, CbState, EP, Assoc),
 	inet:setopts(Socket, [{active, Active}]),
 	DaudIn = maps:get(daud_in, Count, 0),
 	NewCount = maps:put(daud_in, DaudIn + 1, Count),
@@ -1212,21 +1234,35 @@ reg_request([H | T], StateName, #statedata{socket = Socket,
 							cb_state = NewCbState},
 					RegResult = {?RegistrationResult, RR},
 					reg_request(T, StateName, NewStateData, [RegResult | RegResults], [Notify | Notifies]);
-				{atomic, {not_reg, AsState, #registration_result{rc = NewRC} = RR}} ->
+				{atomic, {not_reg, AsState,
+						#registration_result{rc = NewRC, status = Status} = RR}} ->
+					?LOG_NOTICE("Routing key registration refused",
+							#{layer => m3ua, ep => EP, assoc => Assoc,
+							rc => NewRC, reason => Status}),
 					NewRKs = update_rks(NewRC, RK, AsState, RKs),
 					NewStateData = StateData#statedata{rks = NewRKs},
 					RegResult = {?RegistrationResult, RR},
 					reg_request(T, StateName, NewStateData, [RegResult | RegResults], Notifies);
-				{atomic, {not_reg, #registration_result{} = RR}} ->
+				{atomic, {not_reg,
+						#registration_result{rc = NewRC, status = Status} = RR}} ->
+					?LOG_NOTICE("Routing key registration refused",
+							#{layer => m3ua, ep => EP, assoc => Assoc,
+							rc => NewRC, reason => Status}),
 					RegResult = {?RegistrationResult, RR},
 					reg_request(T, StateName, StateData, [RegResult | RegResults], Notifies);
-				{aborted, _Reason} ->
+				{aborted, Reason} ->
+					?LOG_NOTICE("Routing key registration refused",
+							#{layer => m3ua, ep => EP, assoc => Assoc,
+							rc => RC, reason => Reason}),
 					RegResult = {?RegistrationResult, #registration_result{lrk_id = LrkId,
 							status = rk_change_refused, rc = RC}},
 					reg_request(T, StateName, StateData, [RegResult | RegResults], Notifies)
 			end
 	catch
-		_:_Reason ->
+		_:Reason1 ->
+			?LOG_WARNING("Routing key would not decode",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					reason => Reason1}),
 			P0 = m3ua_codec:add_parameter(?ErrorCode, unexpected_parameter, []),
 			ErrorParams = m3ua_codec:parameters(P0),
 			ErrorMsg = #m3ua{class = ?MGMTMessage, type = ?MGMTError, params = ErrorParams},

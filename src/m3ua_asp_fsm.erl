@@ -270,6 +270,7 @@
 
 -include("m3ua.hrl").
 -include_lib("kernel/include/inet_sctp.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -record(statedata,
 		{socket :: gen_sctp:sctp_socket() | undefined,
@@ -500,10 +501,17 @@ down({'M-ASP_UP', request, Ref, From},
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
-down({'MTP-TRANSFER', request, _Ref, _From, _Params}, StateData) ->
+down({'MTP-TRANSFER', request, _Ref, _From, _Params},
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	?LOG_NOTICE("MTP-TRANSFER discarded",
+			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_down}),
 	{next_state, down, StateData};
 down({AspOp, request, Ref, From},
-		#statedata{req = Req} = StateData) when Req /= undefined ->
+		#statedata{ep = EP, assoc = Assoc, req = Req} = StateData)
+		when Req /= undefined ->
+	?LOG_NOTICE("ASP state request refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			op => AspOp, reason => asp_busy}),
 	gen_server:cast(From, {AspOp, confirm, Ref, {error, asp_busy}}),
 	{next_state, down, StateData}.
 
@@ -516,7 +524,10 @@ down({AspOp, request, Ref, From},
 %% 	gen_fsm:sync_send_event/2,3} in the <b>down</b> state.
 %% @private
 %%
-down({'MTP-TRANSFER', request, _Params}, _From, StateData) ->
+down({'MTP-TRANSFER', request, _Params}, _From,
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	?LOG_NOTICE("MTP-TRANSFER refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_down}),
 	{reply, {error, unexpected_message}, down, StateData}.
 
 -spec inactive(Event :: timeout | term(), StateData :: #statedata{}) ->
@@ -576,10 +587,17 @@ inactive({'M-ASP_DOWN', request, Ref, From},
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
-inactive({'MTP-TRANSFER', request, _Ref, _From, _Params}, StateData) ->
+inactive({'MTP-TRANSFER', request, _Ref, _From, _Params},
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	?LOG_NOTICE("MTP-TRANSFER discarded",
+			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_inactive}),
 	{next_state, inactive, StateData};
 inactive({AspOp, request, Ref, From},
-		#statedata{req = Req} = StateData) when Req /= undefined ->
+		#statedata{ep = EP, assoc = Assoc, req = Req} = StateData)
+		when Req /= undefined ->
+	?LOG_NOTICE("ASP state request refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			op => AspOp, reason => asp_busy}),
 	gen_server:cast(From, {AspOp, confirm, Ref, {error, asp_busy}}),
 	{next_state, inactive, StateData}.
 
@@ -592,7 +610,10 @@ inactive({AspOp, request, Ref, From},
 %% 	gen_fsm:sync_send_event/2,3} in the <b>inactive</b> state.
 %% @private
 %%
-inactive({'MTP-TRANSFER', request, _Params}, _From, StateData) ->
+inactive({'MTP-TRANSFER', request, _Params}, _From,
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	?LOG_NOTICE("MTP-TRANSFER refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_inactive}),
 	{reply, {error, unexpected_message}, down, StateData}.
 
 -spec active(Event :: timeout | term(), StateData :: #statedata{}) ->
@@ -706,7 +727,11 @@ active({'M-RK_REG', request, _, _, _, _, _, _, _} = Event,
 		#statedata{req = undefined} = StateData) ->
 	handle_reg(Event, active, StateData);
 active({AspOp, request, Ref, From},
-		#statedata{req = Req} = StateData) when Req /= undefined ->
+		#statedata{ep = EP, assoc = Assoc, req = Req} = StateData)
+		when Req /= undefined ->
+	?LOG_NOTICE("ASP state request refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			op => AspOp, reason => asp_busy}),
 	gen_server:cast(From, {AspOp, confirm, Ref, {error, asp_busy}}),
 	{next_state, active, StateData}.
 
@@ -1172,6 +1197,8 @@ handle_asp(#m3ua{class = ?RKMMessage, type = ?RKMREGRSP, params = Params},
 					{stop, {shutdown, {{EP, Assoc}, Reason1}}, StateData}
 			end;
 		[#registration_result{status = Status}] ->
+			?LOG_NOTICE("Routing key registration refused by peer",
+					#{layer => m3ua, ep => EP, assoc => Assoc, reason => Status}),
 			gen_server:cast(From, {'M-RK_REG', confirm, Ref, {error, Status}}),
 			inet:setopts(Socket, [{active, Active}]),
 			NewStateData = StateData#statedata{req = undefined},
@@ -1179,18 +1206,25 @@ handle_asp(#m3ua{class = ?RKMMessage, type = ?RKMREGRSP, params = Params},
 	end;
 handle_asp(#m3ua{class = ?MGMTMessage, type = ?MGMTError, params = Params},
 		StateName, _Stream, #statedata{req = {'M-RK_REG', Ref, From, _RK},
-		socket = Socket, active = Active} = StateData) ->
+		socket = Socket, active = Active,
+		ep = EP, assoc = Assoc} = StateData) ->
 	Parameters = m3ua_codec:parameters(Params),
 	{ok, Reason} = m3ua_codec:find_parameter(?ErrorCode, Parameters),
+	?LOG_NOTICE("Routing key registration refused by peer",
+			#{layer => m3ua, ep => EP, assoc => Assoc, reason => Reason}),
 	gen_server:cast(From, {'M-RK_REG', confirm, Ref, {error, Reason}}),
 	inet:setopts(Socket, [{active, Active}]),
 	NewStateData = StateData#statedata{req = undefined},
 	{next_state, StateName, NewStateData};
 handle_asp(#m3ua{class = ?MGMTMessage, type = ?MGMTError, params = Params},
 		StateName, _Stream, #statedata{req = {AspOp, Ref, From},
-		socket = Socket, active = Active} = StateData) ->
+		socket = Socket, active = Active,
+		ep = EP, assoc = Assoc} = StateData) ->
 	Parameters = m3ua_codec:parameters(Params),
 	{ok, Reason} = m3ua_codec:find_parameter(?ErrorCode, Parameters),
+	?LOG_NOTICE("ASP state request refused by peer",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			op => AspOp, reason => Reason}),
 	gen_server:cast(From, {AspOp, confirm, Ref, {error, Reason}}),
 	inet:setopts(Socket, [{active, Active}]),
 	NewStateData = StateData#statedata{req = undefined},

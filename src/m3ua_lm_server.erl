@@ -48,6 +48,7 @@
 
 -include("m3ua.hrl").
 -include_lib("kernel/include/inet_sctp.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -type stat_option() ::
 	'recv_cnt' | 'recv_max' | 'recv_avg' | 'recv_oct' | 'recv_dvi' |
@@ -458,6 +459,9 @@ handle_cast({'CONNECT', Ref, {ok, EP, AspFsm, Assoc}},
 			NewState = State#state{fsms = NewFsms, reqs = NewReqs},
 			{noreply, NewState};
 		none ->
+			?LOG_NOTICE("Confirmation discarded",
+					#{layer => m3ua, ref => Ref, op => 'CONNECT',
+					reason => no_request_outstanding}),
 			{noreply, State}
 	end;
 handle_cast({'CONNECT', Ref, {error, Reason}},
@@ -469,6 +473,9 @@ handle_cast({'CONNECT', Ref, {error, Reason}},
 			NewState = State#state{reqs = NewReqs},
 			{noreply, NewState};
 		none ->
+			?LOG_NOTICE("Confirmation discarded",
+					#{layer => m3ua, ref => Ref, op => 'CONNECT',
+					reason => no_request_outstanding}),
 			{noreply, State}
 	end;
 handle_cast({'M-SCTP_STATUS', confirm, Ref, Result},
@@ -480,6 +487,9 @@ handle_cast({'M-SCTP_STATUS', confirm, Ref, Result},
 			NewState = State#state{reqs = NewReqs},
 			{noreply, NewState};
 		none ->
+			?LOG_NOTICE("Confirmation discarded",
+					#{layer => m3ua, ref => Ref, op => 'M-SCTP_STATUS',
+					reason => no_request_outstanding}),
 			{noreply, State}
 	end;
 handle_cast({'M-ASP_STATUS', confirm, Ref, Result},
@@ -491,6 +501,9 @@ handle_cast({'M-ASP_STATUS', confirm, Ref, Result},
 			NewState = State#state{reqs = NewReqs},
 			{noreply, NewState};
 		none ->
+			?LOG_NOTICE("Confirmation discarded",
+					#{layer => m3ua, ref => Ref, op => 'M-ASP_STATUS',
+					reason => no_request_outstanding}),
 			{noreply, State}
 	end;
 handle_cast({'M-SCTP_RELEASE', confirm, Ref, Result},
@@ -502,6 +515,9 @@ handle_cast({'M-SCTP_RELEASE', confirm, Ref, Result},
 			NewState = State#state{reqs = NewReqs},
 			{noreply, NewState};
 		none ->
+			?LOG_NOTICE("Confirmation discarded",
+					#{layer => m3ua, ref => Ref, op => 'M-SCTP_RELEASE',
+					reason => no_request_outstanding}),
 			{noreply, State}
 	end;
 handle_cast({_AspOp, confirm, Ref, {error, Reason}},
@@ -513,6 +529,9 @@ handle_cast({_AspOp, confirm, Ref, {error, Reason}},
 			NewState = State#state{reqs = NewReqs},
 			{noreply, NewState};
 		none ->
+			?LOG_NOTICE("Confirmation discarded",
+					#{layer => m3ua, ref => Ref, op => '_AspOp',
+					reason => no_request_outstanding}),
 			{noreply, State}
 	end;
 handle_cast({'M-RK_REG', confirm, Ref, Result},
@@ -524,6 +543,9 @@ handle_cast({'M-RK_REG', confirm, Ref, Result},
 			NewState = State#state{reqs = NewReqs},
 			{noreply, NewState};
 		none ->
+			?LOG_NOTICE("Confirmation discarded",
+					#{layer => m3ua, ref => Ref, op => 'M-RK_REG',
+					reason => no_request_outstanding}),
 			{noreply, State}
 	end;
 handle_cast({'M-SCTP_ESTABLISH', indication, Fsm, EP, Assoc},
@@ -541,6 +563,9 @@ handle_cast({AspOp, confirm, Ref, Result},
 			NewReqs = gb_trees:delete(Ref, Reqs),
 			{noreply, State#state{reqs = NewReqs}};
 		none ->
+			?LOG_NOTICE("Confirmation discarded",
+					#{layer => m3ua, ref => Ref, op => 'AspOp',
+					reason => no_request_outstanding}),
 			{noreply, State}
 	end.
 
