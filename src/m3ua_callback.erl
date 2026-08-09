@@ -26,7 +26,7 @@
 		asp_inactive/1, notify/4, info/2, terminate/2]).
 
 %% export the m3ua_callback private API
--export([cb/3]).
+-export([cb/3, discarding/2]).
 
 -include("m3ua.hrl").
 
@@ -218,6 +218,43 @@ terminate(_Reason, _State) ->
 %%----------------------------------------------------------------------
 %%  The m3ua_callback private API
 %%----------------------------------------------------------------------
+
+-spec discarding(Cb, Indications) -> Discarded
+	when
+		Cb :: atom() | #m3ua_fsm_cb{},
+		Indications :: [atom()],
+		Discarded :: [atom()].
+%% @doc Which of the `Indications' this callback does not take.
+%%
+%% 	The defaults in this module answer for whatever a
+%% 	{@link //m3ua/m3ua.  #m3ua_fsm_cb{}} leaves unset, and answering
+%% 	is all they do: what arrives for them goes no further. That is a
+%% 	property of the configuration rather than of any one message, so
+%% 	the FSMs ask once, when the association comes up, instead of
+%% 	saying it again for every message they drop.
+%%
+%% 	A callback given as a module name is not counted, since a module
+%% 	that does not export the function fails loudly rather than
+%% 	silently, unless it is this module itself.
+%% @private
+discarding(?MODULE, Indications) ->
+	Indications;
+discarding(Cb, _Indications) when is_atom(Cb) ->
+	[];
+discarding(#m3ua_fsm_cb{} = Cb, Indications) ->
+	[Name || Name <- Indications, takes(Cb, Name) == false].
+
+%% @hidden
+takes(#m3ua_fsm_cb{recv = F}, recv) ->
+	F /= false;
+takes(#m3ua_fsm_cb{pause = F}, pause) ->
+	F /= false;
+takes(#m3ua_fsm_cb{resume = F}, resume) ->
+	F /= false;
+takes(#m3ua_fsm_cb{status = F}, status) ->
+	F /= false;
+takes(#m3ua_fsm_cb{audit = F}, audit) ->
+	F /= false.
 
 -spec cb(Handler, Cb, Args) -> Result
 	when

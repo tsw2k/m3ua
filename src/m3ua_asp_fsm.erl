@@ -447,6 +447,7 @@ init([Socket, Address, Port,
 	CbArgs = [?MODULE, self(), EP, EpName, Assoc, CbOpts],
 	case m3ua_callback:cb(init, Cb, CbArgs) of
 		{ok, Active, CbState} ->
+			report_discarding(Cb, EP, Assoc),
 			case inet:setopts(Socket, [{active, Active}]) of
 				ok ->
 					Statedata = #statedata{socket = Socket, active = Active,
@@ -648,7 +649,7 @@ active({'MTP-TRANSFER', request, Ref, From,
 		true when is_integer(RC) ->
 			m3ua_codec:add_parameter(?RoutingContext, [RC], P0);
 		true ->
-			RC1 = get_rc(DPC, OPC, SI, RKs),
+			RC1 = get_rc(DPC, OPC, SI, RKs, EP, Assoc),
 			m3ua_codec:add_parameter(?RoutingContext, [RC1], P0);
 		false ->
 			P0
@@ -756,7 +757,7 @@ active({'MTP-TRANSFER', request, {Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
 		true when is_integer(RC) ->
 			m3ua_codec:add_parameter(?RoutingContext, [RC], P0);
 		true ->
-			RC1 = get_rc(DPC, OPC, SI, RKs),
+			RC1 = get_rc(DPC, OPC, SI, RKs, EP, Assoc),
 			m3ua_codec:add_parameter(?RoutingContext, [RC1], P0);
 		false ->
 			P0
@@ -1010,6 +1011,29 @@ code_change(_OldVsn, StateName, StateData, _Extra) ->
 %%----------------------------------------------------------------------
 %%  internal functions
 %%----------------------------------------------------------------------
+
+-spec report_discarding(Cb, EP, Assoc) -> ok
+	when
+		Cb :: atom() | #m3ua_fsm_cb{},
+		EP :: pid(),
+		Assoc :: gen_sctp:assoc_id().
+%% @doc Say once which indications this association will discard.
+%%
+%% 	An indication with no handler behind it is dropped by the defaults
+%% 	in {@link //m3ua/m3ua_callback. m3ua_callback}. Saying so for each
+%% 	message would put a line on the data path for every packet, so it
+%% 	is said here, where the configuration that decides it is known.
+%% @hidden
+report_discarding(Cb, EP, Assoc) ->
+	case m3ua_callback:discarding(Cb, [recv, pause, resume, status]) of
+		[] ->
+			ok;
+		Discarded ->
+			?LOG_NOTICE("Indications will be discarded",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					indications => Discarded, reason => no_callback}),
+			ok
+	end.
 
 %% @hidden
 handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
@@ -1330,7 +1354,7 @@ handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMBEAT, params = Params},
 generate_lrk_id() ->
 	rand:uniform(16#ffffffff).
 
--spec get_rc(DPC, OPC, SI, RKs) -> RC
+-spec get_rc(DPC, OPC, SI, RKs, EP, Assoc) -> RC
 	when
 		DPC :: 0..16777215,
 		OPC :: 0..16777215,
@@ -1341,17 +1365,29 @@ generate_lrk_id() ->
 		NA :: byte(),
 		Keys :: [{DPC, [SI], [OPC]}],
 		TMT :: m3ua:tmt(),
-		AsState :: down | inactive | active | pending.
+		AsState :: down | inactive | active | pending,
+		EP :: pid(),
+		Assoc :: gen_sctp:assoc_id().
 %% @doc Find routing context matching destination.
+%%
+%% 	Exhausting the routing keys takes the association down, as it
+%% 	always has. It names the destination it could not place on the way
+%% 	out, so the crash report says which message stopped and why rather
+%% 	than only that a clause did not match.
 %% @hidden
-get_rc(DPC, OPC, SI, [{RC, RK, _} | T] = _RKs)
+get_rc(DPC, OPC, SI, [{RC, RK, _} | T] = _RKs, EP, Assoc)
 		when is_integer(DPC), is_integer(OPC), is_integer(SI) ->
 	case m3ua:keymember(DPC, OPC, SI, [RK]) of
 		true ->
 			RC;
 		false ->
-			get_rc(DPC, OPC, SI, T)
-	end.
+			get_rc(DPC, OPC, SI, T, EP, Assoc)
+	end;
+get_rc(DPC, OPC, SI, [], EP, Assoc) ->
+	?LOG_NOTICE("MTP-TRANSFER discarded",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			dpc => DPC, opc => OPC, si => SI, reason => no_routing_key}),
+	error(no_routing_key).
 
 -spec reg_tables(RC, RK, Name, AspState) -> Result
 	when
