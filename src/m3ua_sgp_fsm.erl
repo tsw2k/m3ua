@@ -416,6 +416,7 @@ init([Socket, Address, Port,
 	case m3ua_callback:cb(init, Cb, CbArgs) of
 		{ok, Active, CbState} ->
 			report_discarding(Cb, EP, Assoc),
+			report_carrying(undefined, down, EP, Assoc),
 			case inet:setopts(Socket, [{active, Active}]) of
 				ok ->
 					Statedata = #statedata{socket = Socket, active = Active,
@@ -430,6 +431,7 @@ init([Socket, Address, Port,
 			end;
 		{ok, Active, CbState, RKs} when is_list(RKs) ->
 			report_discarding(Cb, EP, Assoc),
+			report_carrying(undefined, down, EP, Assoc),
 			StateData = #statedata{socket = Socket, active = Active,
 					assoc = Assoc, peer_addr = Address, peer_port = Port,
 					in_streams = InStreams, out_streams = OutStreams,
@@ -941,6 +943,50 @@ ssnm_count(?SSNMDUPU) -> dupu_out;
 ssnm_count(?SSNMDRST) -> drst_out.
 
 
+-spec report_carrying(StateName, NextStateName, EP, Assoc) -> ok
+	when
+		StateName :: undefined | atom(),
+		NextStateName :: atom(),
+		EP :: pid(),
+		Assoc :: gen_sctp:assoc_id().
+%% @doc Say once when this association starts or stops carrying traffic.
+%%
+%% 	Only the active state carries. Whether it does is a condition and
+%% 	not a property of any one message, so it is said when it becomes
+%% 	true and again when it clears; the messages that stop meanwhile say
+%% 	so on their own account. Said at startup as well, since an
+%% 	association that comes up and never carries would otherwise be
+%% 	indistinguishable from one with nothing to do.
+%% @hidden
+report_carrying(undefined, NextStateName, EP, Assoc)
+		when NextStateName /= active ->
+	?LOG_NOTICE("Cannot carry traffic",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			reason => carrying_reason(NextStateName)}),
+	ok;
+report_carrying(StateName, StateName, _EP, _Assoc) ->
+	ok;
+report_carrying(active, NextStateName, EP, Assoc) ->
+	?LOG_NOTICE("Cannot carry traffic",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			reason => carrying_reason(NextStateName)}),
+	ok;
+report_carrying(_StateName, active, EP, Assoc) ->
+	?LOG_NOTICE("Carrying traffic",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			reason => asp_active}),
+	ok;
+report_carrying(_StateName, _NextStateName, _EP, _Assoc) ->
+	ok.
+
+%% @hidden
+carrying_reason(down) ->
+	asp_down;
+carrying_reason(inactive) ->
+	asp_inactive;
+carrying_reason(Other) ->
+	Other.
+
 -spec report_discarding(Cb, EP, Assoc) -> ok
 	when
 		Cb :: atom() | #m3ua_fsm_cb{},
@@ -1078,6 +1124,7 @@ handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC, params = Params},
 			NextCount = maps:put(active_ack_out, ActiveAckOut + 1, NewCount),
 			NextStateData = NewStateData#statedata{cb_state = NewCbState,
 					count = NextCount},
+			report_carrying(inactive, active, EP, Assoc),
 			{next_state, active, NextStateData};
 		{error, eagain} ->
 			% @todo flow control
@@ -1106,6 +1153,7 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN, params = Params},
 			NextCount = maps:put(down_ack_out, DownAckOut + 1, NewCount),
 			NextStateData = NewStateData#statedata{cb_state = NewCbState,
 					count = NextCount},
+			report_carrying(StateName, down, EP, Assoc),
 			{next_state, down, NextStateData};
 		{error, eagain} ->
 			% @todo flow control
@@ -1133,6 +1181,7 @@ handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIA, params = Params},
 			NextCount = maps:put(inactive_ack_out, InactiveAckOut + 1, NewCount),
 			NextStateData = NewStateData#statedata{cb_state = NewCbState,
 					count = NextCount},
+			report_carrying(active, inactive, EP, Assoc),
 			{next_state, inactive, NextStateData};
 		{error, eagain} ->
 			% @todo flow control

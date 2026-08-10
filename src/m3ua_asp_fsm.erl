@@ -448,6 +448,7 @@ init([Socket, Address, Port,
 	case m3ua_callback:cb(init, Cb, CbArgs) of
 		{ok, Active, CbState} ->
 			report_discarding(Cb, EP, Assoc),
+			report_carrying(undefined, down, EP, Assoc),
 			case inet:setopts(Socket, [{active, Active}]) of
 				ok ->
 					Statedata = #statedata{socket = Socket, active = Active,
@@ -630,10 +631,12 @@ active(timeout, #statedata{req = {'M-RK_REG', Ref, From, _RK}} = StateData) ->
 	gen_server:cast(From, {'M-RK_REG', confirm, Ref, {error, timeout}}),
 	NewStateData = StateData#statedata{req = undefined},
 	{next_state, active, NewStateData};
-active(timeout, #statedata{req = {AspOp, Ref, From}} = StateData)
+active(timeout, #statedata{req = {AspOp, Ref, From},
+		ep = EP, assoc = Assoc} = StateData)
 		when AspOp == 'M-ASP_INACTIVE'; AspOp == 'M-ASP_DOWN' ->
 	gen_server:cast(From, {AspOp, Ref, self(), {error, timeout}}),
 	NewStateData = StateData#statedata{req = undefined},
+	report_carrying(active, down, EP, Assoc),
 	{next_state, down, NewStateData};
 active({'MTP-TRANSFER', request, Ref, From,
 		{Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
@@ -1012,6 +1015,50 @@ code_change(_OldVsn, StateName, StateData, _Extra) ->
 %%  internal functions
 %%----------------------------------------------------------------------
 
+-spec report_carrying(StateName, NextStateName, EP, Assoc) -> ok
+	when
+		StateName :: undefined | atom(),
+		NextStateName :: atom(),
+		EP :: pid(),
+		Assoc :: gen_sctp:assoc_id().
+%% @doc Say once when this association starts or stops carrying traffic.
+%%
+%% 	Only the active state carries. Whether it does is a condition and
+%% 	not a property of any one message, so it is said when it becomes
+%% 	true and again when it clears; the messages that stop meanwhile say
+%% 	so on their own account. Said at startup as well, since an
+%% 	association that comes up and never carries would otherwise be
+%% 	indistinguishable from one with nothing to do.
+%% @hidden
+report_carrying(undefined, NextStateName, EP, Assoc)
+		when NextStateName /= active ->
+	?LOG_NOTICE("Cannot carry traffic",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			reason => carrying_reason(NextStateName)}),
+	ok;
+report_carrying(StateName, StateName, _EP, _Assoc) ->
+	ok;
+report_carrying(active, NextStateName, EP, Assoc) ->
+	?LOG_NOTICE("Cannot carry traffic",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			reason => carrying_reason(NextStateName)}),
+	ok;
+report_carrying(_StateName, active, EP, Assoc) ->
+	?LOG_NOTICE("Carrying traffic",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			reason => asp_active}),
+	ok;
+report_carrying(_StateName, _NextStateName, _EP, _Assoc) ->
+	ok.
+
+%% @hidden
+carrying_reason(down) ->
+	asp_down;
+carrying_reason(inactive) ->
+	asp_inactive;
+carrying_reason(Other) ->
+	Other.
+
 -spec report_discarding(Cb, EP, Assoc) -> ok
 	when
 		Cb :: atom() | #m3ua_fsm_cb{},
@@ -1139,6 +1186,7 @@ handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDNACK, params = Params},
 			DownAckIn = maps:get(down_ack_in, Count, 0),
 			NewCount = maps:put(down_ack_in, DownAckIn + 1, Count),
 			NextStateData = NewStateData#statedata{count = NewCount},
+			report_carrying(StateName, NewState, EP, Assoc),
 			{next_state, NewState, NextStateData};
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
@@ -1165,6 +1213,7 @@ handle_asp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPACACK, params = Params},
 			ActiveAckIn = maps:get(active_ack_in, Count, 0),
 			NewCount = maps:put(active_ack_in, ActiveAckIn + 1, Count),
 			NextStateData = NewStateData#statedata{count = NewCount},
+			report_carrying(inactive, NewState, EP, Assoc),
 			{next_state, NewState, NextStateData};
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
@@ -1191,6 +1240,7 @@ handle_asp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIAACK, params = Params},
 			InactiveAckIn = maps:get(inactive_ack_in, Count, 0),
 			NewCount = maps:put(inactive_ack_in, InactiveAckIn + 1, Count),
 			NextStateData = NewStateData#statedata{count = NewCount},
+			report_carrying(active, NewState, EP, Assoc),
 			{next_state, NewState, NextStateData};
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
