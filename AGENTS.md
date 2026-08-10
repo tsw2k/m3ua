@@ -46,6 +46,18 @@ merges is worth more than a fork that diverged for tidiness.
     metadata every time, because "discarded" without one says no more than the
     counter already did. A message that dies silently is indistinguishable from
     one that was never sent.
+  - **An association that cannot carry traffic says so once, when that becomes
+    true and again when it clears** — separately from, and in addition to, the
+    messages that then stop. Here the condition is an ASP that is not active:
+    set by ASPAC, cleared by ASPIA, ASPDN or the timeout that gives up on one
+    of them, and holding until something changes it. Said once per discarded
+    message it is the wrong shape twice over — far too loud under traffic, and
+    **completely silent without any**, which is the half that caught us: in one
+    run of `stack_corpus.erl` over an hour of the mirror this library said
+    nothing at all, because nothing drove it, and "no association" and "working
+    perfectly" were the same silence. It follows that an association that comes
+    up and does not carry says so then, rather than waiting for the first
+    message to arrive and be lost.
   - `debug` is a decision and its reason; `notice` a state change worth seeing
     unasked — an association up, an ASP active, a route unavailable; `warning`
     and above are faults.
