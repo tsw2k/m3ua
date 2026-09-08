@@ -106,7 +106,7 @@ init([Sup, Callback, Opts] = _Args) ->
 		false ->
 			Opts5 ++ PpiOptions
 	end,
-	Options = [{active, once}, {reuseaddr, true} | Opts6],
+	Options = buffered([{active, once}, {reuseaddr, true} | Opts6]),
 	try
 		case gen_sctp:open(Options) of
 			{ok, Socket} ->
@@ -312,4 +312,18 @@ accept(Socket, Address, Port,
 		{error, Reason} ->
 			{stop, Reason, StateData}
 	end.
+
+%% @hidden
+%% The kernel's buffers unless the caller named its own; see the note
+%% at ?M3UA_RECBUF in m3ua.hrl for the measurement behind the default.
+buffered(Options) ->
+	Rec = case lists:keymember(recbuf, 1, Options) of
+		true -> [];
+		false -> [{recbuf, ?M3UA_RECBUF}]
+	end,
+	Snd = case lists:keymember(sndbuf, 1, Options) of
+		true -> [];
+		false -> [{sndbuf, ?M3UA_SNDBUF}]
+	end,
+	Rec ++ Snd ++ Options.
 

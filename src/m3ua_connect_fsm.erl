@@ -114,7 +114,7 @@ init([Sup, Callback, Opts] = _Args) ->
 	end,
 	case lists:keytake(connect, 1, Opts6) of
 		{value, {connect, Raddr, Rport, Ropts}, O7} ->
-			Options = [{active, once}, {reuseaddr, true} | O7],
+			Options = buffered([{active, once}, {reuseaddr, true} | O7]),
 			process_flag(trap_exit, true),
 			StateData = #statedata{sup = Sup, role = Role,
 					name = Name, static = Static, use_rc = UseRC,
@@ -348,4 +348,18 @@ handle_connect(AssocChange, #statedata{socket = Socket,
 		{error, Reason} ->
 			{stop, Reason, StateData}
 	end.
+
+%% @hidden
+%% The kernel's buffers unless the caller named its own; see the note
+%% at ?M3UA_RECBUF in m3ua.hrl for the measurement behind the default.
+buffered(Options) ->
+	Rec = case lists:keymember(recbuf, 1, Options) of
+		true -> [];
+		false -> [{recbuf, ?M3UA_RECBUF}]
+	end,
+	Snd = case lists:keymember(sndbuf, 1, Options) of
+		true -> [];
+		false -> [{sndbuf, ?M3UA_SNDBUF}]
+	end,
+	Rec ++ Snd ++ Options.
 

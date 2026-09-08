@@ -16,6 +16,21 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%
 %% M3UA Message Classes
+%% The kernel is asked for these SCTP socket buffers unless the caller
+%% names its own.  Left unset, the inet driver opens an SCTP socket with
+%% a 2304 octet receive buffer, and Linux charges the receive window a
+%% whole skb for every chunk: one packet carrying a few dozen small
+%% chunks exhausts it, the rest are dropped, and recovery is by
+%% retransmission timeout.  Measured in the NG-STP lab on the sibling
+%% M2PA transport: eight messages a second without this, between four
+%% and five hundred with it, on loopback and over a real path alike;
+%% 256 kB and 4 MB measured the same, so the useful size is the bottom
+%% of that range.  M3UA messages are the same shape of traffic --
+%% small DATA chunks at signalling rates -- and this fork's sockets had
+%% no buffer options at all.
+-define(M3UA_RECBUF, 262144).
+-define(M3UA_SNDBUF, 262144).
+
 -define(MGMTMessage,       0).
 -define(TransferMessage,   1).
 -define(SSNMMessage,       2).
