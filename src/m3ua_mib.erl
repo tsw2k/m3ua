@@ -233,7 +233,7 @@ asp_stat_table(get_next, _, Columns) ->
 
 %% @hidden
 mibs() ->
-	["SIGSCALE-M3UA-MIB"].
+	["MTXC-M3UA-MIB"].
 
 -spec ep_table_get(EPs, Index, Columns) -> Result
 	when

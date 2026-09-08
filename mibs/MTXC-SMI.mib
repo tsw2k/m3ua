@@ -1,0 +1,43 @@
+MTXC-SMI DEFINITIONS ::= BEGIN
+
+IMPORTS
+		MODULE-IDENTITY, OBJECT-IDENTITY, enterprises
+			FROM SNMPv2-SMI;
+
+mtxcSMI MODULE-IDENTITY
+		LAST-UPDATED "202609090000Z"
+		ORGANIZATION "MTX Connect"
+		CONTACT-INFO
+			"MTX Connect S.a r.l."
+		DESCRIPTION
+			"The structure of management information for MTX Connect.
+
+			 Private enterprise number 66575, registered with IANA.
+
+			 This module exists so that our MIBs hang from our own arc.
+			 Before it, SIGSCALE-M3UA-MIB imported sigscaleExperiment
+			 from SIGSCALE-SMI, which meant our objects lived under
+			 another company's enterprise number and every host needed
+			 the sigscale_mibs application installed to compile them."
+	::= {enterprises 66575}
+
+mtxcModules OBJECT-IDENTITY
+		STATUS   current
+		DESCRIPTION
+			"Registrations for MIB modules."
+	::= {mtxcSMI 1}
+
+mtxcProducts OBJECT-IDENTITY
+		STATUS   current
+		DESCRIPTION
+			"Registrations for products."
+	::= {mtxcSMI 2}
+
+mtxcExperiment OBJECT-IDENTITY
+		STATUS   current
+		DESCRIPTION
+			"The root from which experimental MIB values are assigned.
+			 A module lives here until its objects have settled."
+	::= {mtxcSMI 3}
+
+END
