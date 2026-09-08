@@ -244,6 +244,11 @@ discarding(Cb, _Indications) when is_atom(Cb) ->
 discarding(#m3ua_fsm_cb{} = Cb, Indications) ->
 	[Name || Name <- Indications, takes(Cb, Name) == false].
 
+%% @doc Whether a handler stands behind one indication.
+%%
+%% 	An indication this does not know about is answered `true', so that
+%% 	naming a new one reports nothing rather than raising: this is
+%% 	advisory, and must not be able to end the association it describes.
 %% @hidden
 takes(#m3ua_fsm_cb{recv = F}, recv) ->
 	F /= false;
@@ -254,7 +259,9 @@ takes(#m3ua_fsm_cb{resume = F}, resume) ->
 takes(#m3ua_fsm_cb{status = F}, status) ->
 	F /= false;
 takes(#m3ua_fsm_cb{audit = F}, audit) ->
-	F /= false.
+	F /= false;
+takes(#m3ua_fsm_cb{}, _Name) ->
+	true.
 
 -spec cb(Handler, Cb, Args) -> Result
 	when

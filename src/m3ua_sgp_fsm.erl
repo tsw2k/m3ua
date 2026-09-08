@@ -415,8 +415,6 @@ init([Socket, Address, Port,
 	CbArgs = [?MODULE, self(), EP, EpName, Assoc, CbOpts],
 	case m3ua_callback:cb(init, Cb, CbArgs) of
 		{ok, Active, CbState} ->
-			report_discarding(Cb, EP, Assoc),
-			report_carrying(undefined, down, EP, Assoc),
 			case inet:setopts(Socket, [{active, Active}]) of
 				ok ->
 					Statedata = #statedata{socket = Socket, active = Active,
@@ -425,13 +423,13 @@ init([Socket, Address, Port,
 							ep = EP, ep_name = EpName,
 							callback = Cb, cb_opts = CbOpts, cb_state = CbState,
 							static = Static, use_rc = UseRC},
+					report_discarding(Cb, EP, Assoc),
+					report_carrying(undefined, down, EP, Assoc),
 					{ok, down, Statedata, 0};
 				{error, Reason} ->
 					{stop, Reason}
 			end;
 		{ok, Active, CbState, RKs} when is_list(RKs) ->
-			report_discarding(Cb, EP, Assoc),
-			report_carrying(undefined, down, EP, Assoc),
 			StateData = #statedata{socket = Socket, active = Active,
 					assoc = Assoc, peer_addr = Address, peer_port = Port,
 					in_streams = InStreams, out_streams = OutStreams,
@@ -451,10 +449,13 @@ init1([{RC, RK, Name} | T], StateData, Acc) ->
 		{error, Reason} ->
 			{stop, Reason}
 	end;
-init1([], #statedata{socket = Socket, active = Active} = StateData, Acc) ->
+init1([], #statedata{socket = Socket, active = Active,
+		callback = Cb, ep = EP, assoc = Assoc} = StateData, Acc) ->
 	case inet:setopts(Socket, [{active, Active}]) of
 		ok ->
 			NewStateData = StateData#statedata{rks = lists:reverse(Acc)},
+			report_discarding(Cb, EP, Assoc),
+			report_carrying(undefined, down, EP, Assoc),
 			{ok, down, NewStateData, 0};
 		{error, Reason} ->
 			{stop, Reason}
@@ -486,10 +487,13 @@ down(timeout, #statedata{ep = EP, assoc = Assoc,
 %% @private
 %%
 down({'MTP-TRANSFER', request, _Params}, _From,
-		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+		#statedata{ep = EP, assoc = Assoc, count = Count} = StateData) ->
 	?LOG_NOTICE("MTP-TRANSFER refused",
 			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_down}),
-	{reply, {error, unexpected_message}, down, StateData}.
+	Discarded = maps:get(transfer_discarded, Count, 0),
+	NewCount = maps:put(transfer_discarded, Discarded + 1, Count),
+	{reply, {error, unexpected_message}, down,
+			StateData#statedata{count = NewCount}}.
 
 -spec inactive(Event :: timeout | term(), StateData :: #statedata{}) ->
 	{next_state, NextStateName :: atom(), NewStateData :: #statedata{}}
@@ -503,10 +507,12 @@ down({'MTP-TRANSFER', request, _Params}, _From,
 inactive({'M-RK_REG', request, _, _, _, _, _, _, _} = Event, StateData) ->
 	handle_reg(Event, inactive, StateData);
 inactive({'MTP-TRANSFER', request, _Ref, _From, _Params},
-		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+		#statedata{ep = EP, assoc = Assoc, count = Count} = StateData) ->
 	?LOG_NOTICE("MTP-TRANSFER discarded",
 			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_inactive}),
-	{next_state, inactive, StateData}.
+	Discarded = maps:get(transfer_discarded, Count, 0),
+	NewCount = maps:put(transfer_discarded, Discarded + 1, Count),
+	{next_state, inactive, StateData#statedata{count = NewCount}}.
 
 -spec inactive(Event :: timeout | term(),
 		From :: {pid(), Tag :: term()}, StateData :: #statedata{}) ->
@@ -519,10 +525,13 @@ inactive({'MTP-TRANSFER', request, _Ref, _From, _Params},
 %% @private
 %%
 inactive({'MTP-TRANSFER', request, _Params}, _From,
-		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+		#statedata{ep = EP, assoc = Assoc, count = Count} = StateData) ->
 	?LOG_NOTICE("MTP-TRANSFER refused",
 			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_inactive}),
-	{reply, {error, unexpected_message}, down, StateData}.
+	Discarded = maps:get(transfer_discarded, Count, 0),
+	NewCount = maps:put(transfer_discarded, Discarded + 1, Count),
+	{reply, {error, unexpected_message}, down,
+			StateData#statedata{count = NewCount}}.
 
 -spec active(Event :: timeout | term(), StateData :: #statedata{}) ->
 	{next_state, NextStateName :: atom(), NewStateData :: #statedata{}}
@@ -843,8 +852,10 @@ handle_info(Info, StateName, #statedata{socket = Socket,
 %% @private
 %%
 terminate(Reason, StateName, #statedata{socket = undefined} = StateData) ->
+	report_terminated(Reason, StateName, StateData),
 	terminate1(Reason, StateName, StateData);
 terminate(Reason, StateName, #statedata{socket = Socket} = StateData) ->
+	report_terminated(Reason, StateName, StateData),
 	case gen_sctp:close(Socket) of
 		ok ->
 			ok;
@@ -942,6 +953,37 @@ ssnm_count(?SSNMSCON) -> scon_out;
 ssnm_count(?SSNMDUPU) -> dupu_out;
 ssnm_count(?SSNMDRST) -> drst_out.
 
+
+-spec report_terminated(Reason, StateName, StateData) -> ok
+	when
+		Reason :: term(),
+		StateName :: atom(),
+		StateData :: #statedata{}.
+%% @doc Retract the carrying condition when the association goes away.
+%%
+%% 	Every other way of ceasing to carry is a transition, and
+%% 	report_carrying/4 catches it there. Terminating is not: comm_lost,
+%% 	an unreachable peer, a shutdown or a release all leave the active
+%% 	state without passing through another one. Said here so that a
+%% 	"Carrying traffic" line always has a mate, and an association that
+%% 	died carrying does not read as one that still is.
+%% @hidden
+report_terminated(Reason, active,
+		#statedata{ep = EP, assoc = Assoc} = _StateData) ->
+	?LOG_NOTICE("Cannot carry traffic",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			reason => terminate_reason(Reason)}),
+	ok;
+report_terminated(_Reason, _StateName, _StateData) ->
+	ok.
+
+%% @hidden
+terminate_reason({shutdown, {{_EP, _Assoc}, Reason}}) ->
+	Reason;
+terminate_reason({shutdown, Reason}) ->
+	Reason;
+terminate_reason(Reason) ->
+	Reason.
 
 -spec report_carrying(StateName, NextStateName, EP, Assoc) -> ok
 	when
@@ -1325,7 +1367,7 @@ reg_request([H | T], StateName, #statedata{socket = Socket,
 					RegResult = {?RegistrationResult, RR},
 					reg_request(T, StateName, StateData, [RegResult | RegResults], Notifies);
 				{aborted, Reason} ->
-					?LOG_NOTICE("Routing key registration refused",
+					?LOG_WARNING("Routing key registration failed",
 							#{layer => m3ua, ep => EP, assoc => Assoc,
 							rc => RC, reason => Reason}),
 					RegResult = {?RegistrationResult, #registration_result{lrk_id = LrkId,

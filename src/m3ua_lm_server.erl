@@ -520,7 +520,7 @@ handle_cast({'M-SCTP_RELEASE', confirm, Ref, Result},
 					reason => no_request_outstanding}),
 			{noreply, State}
 	end;
-handle_cast({_AspOp, confirm, Ref, {error, Reason}},
+handle_cast({AspOp, confirm, Ref, {error, Reason}},
 		#state{reqs = Reqs} = State) ->
 	case gb_trees:lookup(Ref, Reqs) of
 		{value, From} ->
@@ -530,7 +530,7 @@ handle_cast({_AspOp, confirm, Ref, {error, Reason}},
 			{noreply, NewState};
 		none ->
 			?LOG_NOTICE("Confirmation discarded",
-					#{layer => m3ua, ref => Ref, op => '_AspOp',
+					#{layer => m3ua, ref => Ref, op => AspOp,
 					reason => no_request_outstanding}),
 			{noreply, State}
 	end;
@@ -564,7 +564,7 @@ handle_cast({AspOp, confirm, Ref, Result},
 			{noreply, State#state{reqs = NewReqs}};
 		none ->
 			?LOG_NOTICE("Confirmation discarded",
-					#{layer => m3ua, ref => Ref, op => 'AspOp',
+					#{layer => m3ua, ref => Ref, op => AspOp,
 					reason => no_request_outstanding}),
 			{noreply, State}
 	end.
