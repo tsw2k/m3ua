@@ -92,7 +92,15 @@ start(Socket, Owner, Active) ->
 %%
 %% 	Used where a socket changes hands: whatever has not been read
 %% 	stays in the receive buffer, and the new owner's receiver reads it.
+%%
+%% 	The link goes first. It is there so that a receiver dying takes
+%% 	its owner with it, and a receiver asked to stop is not that: the
+%% 	`{'EXIT', Receiver, normal}' it would otherwise send arrives at an
+%% 	owner that has already forgotten it and dies of a function_clause
+%% 	on the way. `unlink/1' also discards an exit signal already on its
+%% 	way, which is the whole reason it is safe to use here.
 stop(Receiver) ->
+	true = unlink(Receiver),
 	Receiver ! stop,
 	ok.
 
