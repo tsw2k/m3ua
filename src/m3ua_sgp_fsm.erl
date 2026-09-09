@@ -562,8 +562,7 @@ active({'MTP-TRANSFER', request, Ref, From,
 		true when is_integer(RC) ->
 			m3ua_codec:add_parameter(?RoutingContext, [RC], P0);
 		true ->
-			RC1 = get_rc(DPC, OPC, SI, RKs, EP, Assoc),
-			m3ua_codec:add_parameter(?RoutingContext, [RC1], P0);
+			routing_context(get_rc(DPC, OPC, SI, RKs, EP, Assoc), P0);
 		false ->
 			P0
 	end,
@@ -620,8 +619,7 @@ active({'MTP-TRANSFER', request, {Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
 		true when is_integer(RC) ->
 			m3ua_codec:add_parameter(?RoutingContext, [RC], P0);
 		true ->
-			RC1 = get_rc(DPC, OPC, SI, RKs, EP, Assoc),
-			m3ua_codec:add_parameter(?RoutingContext, [RC1], P0);
+			routing_context(get_rc(DPC, OPC, SI, RKs, EP, Assoc), P0);
 		false ->
 			P0
 	end,
@@ -1504,7 +1502,7 @@ send_notify([], StateName,
 	ok = m3ua_receiver:replenish(Receiver, Active),
 	{next_state, StateName, StateData}.
 
--spec get_rc(DPC, OPC, SI, RKs, EP, Assoc) -> RC
+-spec get_rc(DPC, OPC, SI, RKs, EP, Assoc) -> RC | undefined
 	when
 		DPC :: 0..16777215,
 		OPC :: 0..16777215,
@@ -1534,10 +1532,29 @@ get_rc(DPC, OPC, SI, [{RC, RK, _} | T] = _RKs, EP, Assoc)
 			get_rc(DPC, OPC, SI, T, EP, Assoc)
 	end;
 get_rc(DPC, OPC, SI, [], EP, Assoc) ->
-	?LOG_NOTICE("MTP-TRANSFER discarded",
+	%% None to name, so name none. RFC 4666 3.4 makes the parameter
+	%% optional and expects it omitted where the process belongs to one
+	%% application server, which is the ordinary case here: with a
+	%% static routing key the peer goes straight to ASPAC, never sends
+	%% a REGISTER, and there is no context to quote back at it.
+	%%
+	%% This used to raise, which took the association down over one
+	%% message and then over the next, because the peer reconnects and
+	%% sends it again. Four crashes in twenty seconds on nothing but
+	%% MTP3 management, before any traffic was directed into the links
+	%% at all.
+	?LOG_NOTICE("MTP-TRANSFER sent with no routing context",
 			#{layer => m3ua, ep => EP, assoc => Assoc,
 			dpc => DPC, opc => OPC, si => SI, reason => no_routing_key}),
-	error(no_routing_key).
+	undefined.
+
+%% @hidden
+%% 	The absence of a context is carried by leaving the parameter out,
+%% 	not by a parameter holding `undefined'.
+routing_context(undefined, Params) ->
+	Params;
+routing_context(RC, Params) ->
+	m3ua_codec:add_parameter(?RoutingContext, [RC], Params).
 
 -spec reg_tables(RC, RK, Name, AspState) -> Result
 	when
