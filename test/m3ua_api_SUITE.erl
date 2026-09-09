@@ -229,7 +229,9 @@ protocol_identifier(_Config) ->
 		4000 ->
 			{error, no_association}
 	end,
-	[Assoc] = m3ua:get_assoc(EP),
+	%% The association is registered a moment after it comes up, and
+	%% the peer's comm_up is not that moment.
+	[Assoc] = assoc(EP, 40),
 	%% ASP UP is the first thing m3ua puts on the wire, and nothing
 	%% here will acknowledge it, so ask for it and do not wait.
 	_ = spawn(fun() -> catch m3ua:asp_up(EP, Assoc) end),
@@ -243,6 +245,18 @@ protocol_identifier(_Config) ->
 	end,
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+%% @hidden
+assoc(_EP, 0) ->
+	[];
+assoc(EP, N) ->
+	case m3ua:get_assoc(EP) of
+		[] ->
+			timer:sleep(50),
+			assoc(EP, N - 1);
+		Assocs ->
+			Assocs
+	end.
 
 getstat_ep() ->
 	[{userdata, [{doc, "Get SCTP option statistics for an endpoint."}]}].
