@@ -37,7 +37,8 @@
 		{sup :: undefined | pid(),
 		name :: term(),
 		fsm_sup :: undefined | pid(),
-		socket :: gen_sctp:sctp_socket(),
+		socket :: m3ua_sctp:sock(),
+		receiver :: undefined | pid(),
 		options :: [tuple()],
 		cb_options :: term(),
 		role :: sgp | asp,
@@ -108,26 +109,28 @@ init([Sup, Callback, Opts] = _Args) ->
 	end,
 	Options = buffered([{active, once}, {reuseaddr, true} | Opts6]),
 	try
-		case gen_sctp:open(Options) of
+		case m3ua_sctp:open(Options) of
 			{ok, Socket} ->
 				StateData = #statedata{socket = Socket, sup = Sup, role = Role,
 						name = Name, static = Static, use_rc = UseRC,
 						options = Options, cb_options = CbOpts, callback = Callback},
-				case gen_sctp:listen(Socket, true) of
+				case m3ua_sctp:listen(Socket) of
 					ok ->
-						case inet:sockname(Socket) of
+						case m3ua_sctp:sockname(Socket) of
 							{ok, {LocalAddr, LocalPort}} ->
 								process_flag(trap_exit, true),
+								Receiver = m3ua_receiver:start(Socket, self(), once),
 								NewStateData = StateData#statedata{
+										receiver = Receiver,
 										local_addr = LocalAddr,
 										local_port = LocalPort},
 								{ok, listening, NewStateData, 0};
 							{error, Reason} ->
-								gen_sctp:close(Socket),
+								m3ua_sctp:close(Socket),
 								throw(Reason)
 						end;
 					{error, Reason} ->
-						gen_sctp:close(Socket),
+						m3ua_sctp:close(Socket),
 						throw(Reason)
 				end;
 			{error, Reason} ->
@@ -154,7 +157,7 @@ listening(timeout, #statedata{fsm_sup = undefined} = StateData) ->
 listening({'M-SCTP_RELEASE', request, Ref, From},
 		#statedata{socket = Socket} = StateData) ->
 	gen_server:cast(From,
-			{'M-SCTP_RELEASE', confirm, Ref, gen_sctp:close(Socket)}),
+			{'M-SCTP_RELEASE', confirm, Ref, m3ua_sctp:close(Socket)}),
 	{stop, {shutdown, {self(), release}}, StateData}.
 
 -spec handle_event(Event :: term(), StateName :: atom(),
@@ -188,10 +191,10 @@ handle_sync_event(getassoc, _From, StateName,
 	{reply, gb_trees:keys(Fsms), StateName, StateData};
 handle_sync_event({getstat, undefined}, _From, StateName,
 		#statedata{socket = Socket} = StateData) ->
-	{reply, inet:getstat(Socket), StateName, StateData};
+	{reply, m3ua_sctp:getstat(Socket), StateName, StateData};
 handle_sync_event({getstat, Options}, _From, StateName,
 		#statedata{socket = Socket} = StateData) ->
-	{reply, inet:getstat(Socket, Options), StateName, StateData};
+	{reply, m3ua_sctp:getstat(Socket, Options), StateName, StateData};
 handle_sync_event(getep, _From, StateName,
 		#statedata{name = Name, role = Role, local_addr = Laddr,
 		local_port = Lport} = StateData) ->
@@ -211,18 +214,22 @@ handle_info({sctp, Socket, PeerAddr, PeerPort,
 		{_AncData, #sctp_assoc_change{state = comm_up} = AssocChange}},
 		listening, #statedata{fsm_sup = FsmSup, socket = Socket} = StateData) ->
 	accept(Socket, PeerAddr, PeerPort, AssocChange, FsmSup, StateData);
-handle_info({sctp, Socket, _PeerAddr, _PeerPort,
-		{_AncData, #sctp_paddr_change{}}}, StateName, StateData) ->
-	inet:setopts(Socket, [{active, once}]),
+handle_info({sctp, _Socket, _PeerAddr, _PeerPort,
+		{_AncData, #sctp_paddr_change{}}}, StateName,
+		#statedata{receiver = Receiver} = StateData) ->
+	m3ua_receiver:replenish(Receiver, once),
 	{next_state, StateName, StateData};
 handle_info({sctp_error, Socket, PeerAddr, PeerPort,
 		{_AncData, #sctp_remote_error{error = Error,
 		assoc_id = Assoc, data = Data}}}, StateName, StateData) ->
 	error_logger:warning_report(["SCTP Remote Error",
-			{error, gen_sctp:error_string(Error)},
+			{error, m3ua_sctp:error_string(Error)},
 			{assoc, Assoc}, {data, Data}, {socket, Socket},
 			{peer, {PeerAddr, PeerPort}}]),
 	{next_state, StateName, StateData};
+handle_info({'EXIT', Receiver, Reason}, _StateName,
+		#statedata{receiver = Receiver} = StateData) ->
+	{stop, {shutdown, {self(), {receiver, Reason}}}, StateData};
 handle_info({'EXIT', _Pid, {shutdown, {{_EP, Assoc}, _Reason}}},
 		StateName, #statedata{fsms = Fsms} = StateData) ->
 	NewFsms = gb_trees:delete(Assoc, Fsms),
@@ -251,7 +258,7 @@ handle_info({'EXIT', Pid, _Reason}, StateName,
 %% @private
 %%
 terminate(_Reason, _StateName, #statedata{socket = Socket} = StateData) ->
-	case gen_sctp:close(Socket) of
+	case m3ua_sctp:close(Socket) of
 		ok ->
 			ok;
 		{error, Reason1} ->
@@ -287,18 +294,18 @@ get_sup(#statedata{role = sgp, sup = Sup} = StateData) ->
 %% @hidden
 accept(Socket, Address, Port,
 		#sctp_assoc_change{assoc_id = Assoc} = AssocChange,
-		Sup, #statedata{fsms = Fsms, name = Name,
+		Sup, #statedata{fsms = Fsms, name = Name, receiver = Receiver,
 		callback = Cb, cb_options = CbOpts,
 		static = Static, use_rc = UseRC} = StateData) ->
-	case gen_sctp:peeloff(Socket, Assoc) of
+	case m3ua_sctp:peeloff(Socket, Assoc) of
 		{ok, NewSocket} ->
 			case supervisor:start_child(Sup,
 					[[NewSocket, Address, Port, AssocChange, self(),
 					Name, Cb, Static, UseRC, CbOpts], []]) of
 				{ok, Fsm} ->
-					case gen_sctp:controlling_process(NewSocket, Fsm) of
+					case m3ua_sctp:controlling_process(NewSocket, Fsm) of
 						ok ->
-							inet:setopts(Socket, [{active, once}]),
+							m3ua_receiver:replenish(Receiver, once),
 							NewFsms = gb_trees:insert(Assoc, Fsm, Fsms),
 							link(Fsm),
 							NewStateData = StateData#statedata{fsms = NewFsms},

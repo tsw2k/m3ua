@@ -37,7 +37,8 @@
 		{sup :: undefined | pid(),
 		name :: term(),
 		fsm_sup :: undefined | pid(),
-		socket :: undefined | gen_sctp:sctp_socket(),
+		socket :: undefined | m3ua_sctp:sock(),
+		receiver :: undefined | pid(),
 		options :: [tuple()],
 		cb_options :: term(),
 		role :: sgp | asp,
@@ -140,14 +141,16 @@ connecting(timeout, #statedata{fsm_sup = undefined} = StateData) ->
 connecting(timeout, #statedata{options = LocalOptions,
 		remote_addr = RemoteAddress, remote_port = RemotePort,
 		remote_opts = ConnectOptions, name = Name} = StateData) ->
-	case gen_sctp:open(LocalOptions) of
+	case m3ua_sctp:open(LocalOptions) of
 		{ok, Socket} ->
-			case inet:sockname(Socket) of
+			case m3ua_sctp:sockname(Socket) of
 				{ok, {LocalAddress, LocalPort}} ->
-					case gen_sctp:connect_init(Socket,
+					case m3ua_sctp:connect_init(Socket,
 							RemoteAddress, RemotePort, ConnectOptions) of
 						ok ->
+							Receiver = m3ua_receiver:start(Socket, self(), once),
 							NewStateData = StateData#statedata{socket = Socket,
+									receiver = Receiver,
 									local_addr = LocalAddress,
 									local_port = LocalPort},
 							{next_state, connecting, NewStateData};
@@ -156,7 +159,7 @@ connecting(timeout, #statedata{options = LocalOptions,
 									{error, ReasonConnect}, {name, Name},
 									{address, RemoteAddress}, {port, RemotePort},
 									{options, ConnectOptions}]),
-							gen_sctp:close(Socket),
+							m3ua_sctp:close(Socket),
 							NewStateData = StateData#statedata{socket = undefined,
 									local_addr = undefined,
 									local_port = undefined},
@@ -166,7 +169,7 @@ connecting(timeout, #statedata{options = LocalOptions,
 					error_logger:error_report(["Failed to get port number",
 							{module, ?MODULE}, {error, ReasonPort},
 							{state, StateData}]),
-					gen_sctp:close(Socket),
+					m3ua_sctp:close(Socket),
 					{stop, ReasonPort}
 			end;
 		{error, ReasonOpen} ->
@@ -177,7 +180,7 @@ connecting(timeout, #statedata{options = LocalOptions,
 	end;
 connecting({'M-SCTP_RELEASE', request, Ref, From},
 		#statedata{socket = Socket} = StateData) ->
-	gen_server:cast(From, {'M-SCTP_RELEASE', confirm, Ref, gen_sctp:close(Socket)}),
+	gen_server:cast(From, {'M-SCTP_RELEASE', confirm, Ref, m3ua_sctp:close(Socket)}),
 	{stop, {shutdown, {self(), release}}, StateData}.
 
 -spec connected(Event :: timeout | term(), StateData :: #statedata{}) ->
@@ -192,7 +195,7 @@ connecting({'M-SCTP_RELEASE', request, Ref, From},
 connected({'M-SCTP_RELEASE', request, Ref, From},
 		#statedata{socket = Socket} = StateData) ->
 	gen_server:cast(From,
-			{'M-SCTP_RELEASE', confirm, Ref, gen_sctp:close(Socket)}),
+			{'M-SCTP_RELEASE', confirm, Ref, m3ua_sctp:close(Socket)}),
 	{stop, {shutdown, {self(), release}}, StateData}.
 
 -spec handle_event(Event :: term(), StateName :: atom(),
@@ -235,16 +238,16 @@ handle_sync_event(getassoc, _From, connected,
 	{reply, [Assoc], connected, StateData};
 handle_sync_event({getstat, undefined}, _From, connecting,
 		#statedata{socket = Socket} = StateData) ->
-	{reply, inet:getstat(Socket), connecting, StateData, ?RETRY_WAIT};
+	{reply, m3ua_sctp:getstat(Socket), connecting, StateData, ?RETRY_WAIT};
 handle_sync_event({getstat, undefined}, _From, connected,
 		#statedata{socket = Socket} = StateData) ->
-	{reply, inet:getstat(Socket), connected, StateData};
+	{reply, m3ua_sctp:getstat(Socket), connected, StateData};
 handle_sync_event({getstat, Options}, _From, connecting,
 		#statedata{socket = Socket} = StateData) ->
-	{reply, inet:getstat(Socket, Options), connecting, StateData, ?RETRY_WAIT};
+	{reply, m3ua_sctp:getstat(Socket, Options), connecting, StateData, ?RETRY_WAIT};
 handle_sync_event({getstat, Options}, _From, connected,
 		#statedata{socket = Socket} = StateData) ->
-	{reply, inet:getstat(Socket, Options), connected, StateData};
+	{reply, m3ua_sctp:getstat(Socket, Options), connected, StateData};
 handle_sync_event(getep, _From, StateName,
 		#statedata{name = Name, role = Role,
 		local_addr = Laddr, local_port = Lport,
@@ -270,20 +273,27 @@ handle_info({sctp, Socket, _PeerAddr, _PeerPort,
 	handle_connect(AssocChange, NewStateData);
 handle_info({sctp, Socket, _PeerAddr, _PeerPort,
 		{_AncData, #sctp_assoc_change{state = _Reason}}}, connecting,
-		#statedata{socket = Socket} = StateData) ->
-	gen_sctp:close(Socket),
-	NewStateData = StateData#statedata{socket = undefined},
+		#statedata{socket = Socket, receiver = Receiver} = StateData) ->
+	m3ua_receiver:stop(Receiver),
+	m3ua_sctp:close(Socket),
+	NewStateData = StateData#statedata{socket = undefined,
+			receiver = undefined},
 	{next_state, connecting, NewStateData, ?RETRY_WAIT};
+handle_info({'EXIT', Receiver, Reason}, _StateName,
+		#statedata{receiver = Receiver, socket = Socket} = StateData)
+		when Receiver /= undefined ->
+	_ = m3ua_sctp:close(Socket),
+	{stop, {shutdown, {self(), {receiver, Reason}}}, StateData};
 handle_info({'EXIT', Fsm, {shutdown, {{EP, _Assoc}, Reason}}},
 		_StateName, #statedata{socket = Socket, fsm = Fsm} = StateData) ->
-	gen_sctp:close(Socket),
+	m3ua_sctp:close(Socket),
 	{stop, {shutdown, {EP, Reason}}, StateData};
 handle_info({'EXIT', Fsm, Reason}, _StateName,
 		#statedata{socket = undefined, fsm = Fsm} = StateData) ->
 	{stop, Reason, StateData};
 handle_info({'EXIT', Fsm, Reason}, _StateName,
 		#statedata{socket = Socket, fsm = Fsm} = StateData) ->
-	gen_sctp:close(Socket),
+	m3ua_sctp:close(Socket),
 	{stop, Reason, StateData}.
 
 -spec terminate(Reason :: normal | shutdown | {shutdown, term()} | term(),
@@ -296,7 +306,7 @@ handle_info({'EXIT', Fsm, Reason}, _StateName,
 terminate(_Reason, _StateName, #statedata{socket = undefined}) ->
 	ok;
 terminate(_Reason, _StateName, #statedata{socket = Socket} = StateData) ->
-	case gen_sctp:close(Socket) of
+	case m3ua_sctp:close(Socket) of
 		ok ->
 			ok;
 		{error, Reason1} ->
@@ -331,16 +341,19 @@ get_sup(#statedata{role = sgp, sup = Sup} = StateData) ->
 
 %% @hidden
 handle_connect(AssocChange, #statedata{socket = Socket,
-		fsm_sup = Sup, remote_addr = Address, remote_port = Port,
-		name = Name, cb_options = CbOpts, callback = Cb, static = Static,
+		receiver = Receiver, fsm_sup = Sup, remote_addr = Address,
+		remote_port = Port, name = Name, cb_options = CbOpts,
+		callback = Cb, static = Static,
 		use_rc = UseRC} = StateData) ->
+	ok = m3ua_receiver:stop(Receiver),
 	case supervisor:start_child(Sup, [[Socket, Address, Port,
 			AssocChange, self(), Name, Cb, Static, UseRC, CbOpts], []]) of
 		{ok, Fsm} ->
-			case gen_sctp:controlling_process(Socket, Fsm) of
+			case m3ua_sctp:controlling_process(Socket, Fsm) of
 				ok ->
 					link(Fsm),
-					NewStateData = StateData#statedata{fsm = Fsm},
+					NewStateData = StateData#statedata{fsm = Fsm,
+							receiver = undefined},
 					{next_state, connected, NewStateData};
 				{error, Reason} ->
 					{stop, Reason, StateData}
