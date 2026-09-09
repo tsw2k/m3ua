@@ -417,9 +417,8 @@ init([Socket, Address, Port,
 	CbArgs = [?MODULE, self(), EP, EpName, Assoc, CbOpts],
 	case m3ua_callback:cb(init, Cb, CbArgs) of
 		{ok, Active, CbState} ->
-			Receiver = m3ua_receiver:start(Socket, self(), Active),
 			Statedata = #statedata{socket = Socket, active = Active,
-					receiver = Receiver, ppid = m3ua_sctp:ppid(Socket),
+					ppid = m3ua_sctp:ppid(Socket),
 					assoc = Assoc, peer_addr = Address, peer_port = Port,
 					in_streams = InStreams, out_streams = OutStreams,
 					ep = EP, ep_name = EpName,
@@ -448,11 +447,10 @@ init1([{RC, RK, Name} | T], StateData, Acc) ->
 		{error, Reason} ->
 			{stop, Reason}
 	end;
-init1([], #statedata{socket = Socket, active = Active,
+init1([], #statedata{socket = Socket,
 		callback = Cb, ep = EP, assoc = Assoc} = StateData, Acc) ->
-	Receiver = m3ua_receiver:start(Socket, self(), Active),
 	NewStateData = StateData#statedata{rks = lists:reverse(Acc),
-			receiver = Receiver, ppid = m3ua_sctp:ppid(Socket)},
+			ppid = m3ua_sctp:ppid(Socket)},
 	report_discarding(Cb, EP, Assoc),
 	report_carrying(undefined, down, EP, Assoc),
 	{ok, down, NewStateData, 0}.
@@ -466,11 +464,22 @@ init1([], #statedata{socket = Socket, active = Active,
 %% 	gen_fsm:send_event/2} in the <b>down</b> state.
 %% @private
 %%
-down(timeout, #statedata{ep = EP, assoc = Assoc,
+down(timeout, #statedata{ep = EP, assoc = Assoc, receiver = undefined,
+		socket = Socket, active = Active,
 		callback = CbMod, cb_state = CbState} = StateData) ->
 	gen_server:cast(m3ua, {'M-SCTP_ESTABLISH', indication, self(), EP, Assoc}),
+	%% Reading starts here and not in init/1. This state is reached by
+	%% the zero timeout that init/1 asks for, and gen_fsm cancels a
+	%% timeout the moment any message arrives -- so a receiver started
+	%% in init/1 races the registration above and can win it. It did:
+	%% the association came up, carried traffic, and was unknown to
+	%% m3ua_lm_server, so every call naming it answered not_found.
+	%% Nothing is lost by starting late; it waits in the socket's
+	%% receive buffer, which is where the bound wants it anyway.
+	Receiver = m3ua_receiver:start(Socket, self(), Active),
 	{ok, NewCbState} = m3ua_callback:cb(asp_down, CbMod, [CbState]),
-	{next_state, down, StateData#statedata{cb_state = NewCbState}}.
+	{next_state, down, StateData#statedata{cb_state = NewCbState,
+			receiver = Receiver}}.
 
 -spec down(Event :: timeout | term(),
 		From :: {pid(), Tag :: term()}, StateData :: #statedata{}) ->
