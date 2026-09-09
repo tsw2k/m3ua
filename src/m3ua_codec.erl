@@ -27,6 +27,7 @@
 -export([add_parameter/3, store_parameter/3,
 		find_parameter/2, fetch_parameter/2, get_parameter/3,
 		get_all_parameter/2]).
+-export_type([mtp3_user/0, mtp3_cause/0]).
 
 -include("m3ua.hrl").
 
