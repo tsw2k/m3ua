@@ -520,7 +520,8 @@ flags(L) when is_list(L) -> 0.
 %% 	One received message, in the shape gen_sctp delivered it.
 delivered(#{notification := Notification} = Msg) ->
 	Address = maps:get(addr, Msg, undefined),
-	{address(Address), port(Address), [], notification(Notification)};
+	{address(Address), port(Address), [],
+			notification(Notification, address(Address), port(Address))};
 delivered(#{addr := Address, iov := Iov, ctrl := Ctrl}) ->
 	{address(Address), port(Address), ancillary(Ctrl),
 			iolist_to_binary(Iov)};
@@ -540,10 +541,12 @@ port(_Other) -> undefined.
 %% 	map is right except the protocol identifier, which it reads in
 %% 	native order where the octets are big-endian. So take that one
 %% 	field from the octets and the rest from the map.
-ancillary([#{level := sctp, type := ?SCTP_SNDRCV,
-		value := #{} = Value, data := Data} | _]) ->
+ancillary([#{level := sctp, type := Type,
+		value := #{} = Value, data := Data} | _])
+		when Type == sndrcv; Type == ?SCTP_SNDRCV ->
 	[sndrcvinfo(Value, Data)];
-ancillary([#{level := sctp, type := ?SCTP_SNDRCV, data := Data} | _]) ->
+ancillary([#{level := sctp, type := Type, data := Data} | _])
+		when Type == sndrcv; Type == ?SCTP_SNDRCV ->
 	case decode_sndrcvinfo(Data) of
 		#sctp_sndrcvinfo{} = Info ->
 			[Info];
@@ -590,44 +593,36 @@ decode_sndrcvinfo(_Other) ->
 %% 	The runtime hands notifications over decoded; turn each into the
 %% 	record the state machines match on. A notification it does not
 %% 	name is not one m3ua subscribed to.
-notification(#{type := assoc_change} = N) ->
+notification(#{type := assoc_change} = N, _Address, _Port) ->
 	#sctp_assoc_change{state = maps:get(state, N, undefined),
 			error = maps:get(error, N, 0),
 			outbound_streams = maps:get(outbound_streams, N, 0),
 			inbound_streams = maps:get(inbound_streams, N, 0),
 			assoc_id = maps:get(assoc_id, N, 0)};
-notification(#{type := peer_addr_change} = N) ->
-	#sctp_paddr_change{addr = paddr(N),
-			state = maps:get(state, N, undefined),
+notification(#{type := peer_addr_change} = N, Address, Port) ->
+	#sctp_paddr_change{addr = {Address, Port},
+			state = paddr_state(maps:get(state, N, undefined)),
 			error = maps:get(error, N, 0),
 			assoc_id = maps:get(assoc_id, N, 0)};
-notification(#{type := shutdown_event} = N) ->
+notification(#{type := shutdown_event} = N, _Address, _Port) ->
 	#sctp_shutdown_event{assoc_id = maps:get(assoc_id, N, 0)};
-notification(#{type := adaptation_event} = N) ->
-	#sctp_adaptation_event{adaptation_ind = maps:get(indication, N,
-			maps:get(adaption_ind, N, 0)),
+notification(#{type := adaptation_event} = N, _Address, _Port) ->
+	#sctp_adaptation_event{adaptation_ind = maps:get(adaptation_indication,
+			N, 0),
 			assoc_id = maps:get(assoc_id, N, 0)};
-notification(#{type := Type} = N)
+notification(#{type := Type} = N, _Address, _Port)
 		when Type == send_failed; Type == send_failed_event ->
 	#sctp_send_failed{flags = maps:get(flags, N, []),
 			error = maps:get(error, N, 0),
 			info = maps:get(info, N, undefined),
 			assoc_id = maps:get(assoc_id, N, 0),
 			data = maps:get(data, N, <<>>)};
-notification(#{type := remote_error} = N) ->
+notification(#{type := remote_error} = N, _Address, _Port) ->
 	#sctp_remote_error{error = maps:get(error, N, 0),
 			assoc_id = maps:get(assoc_id, N, 0),
 			data = maps:get(data, N, <<>>)};
-notification(#{} = N) ->
+notification(#{} = N, _Address, _Port) ->
 	N.
-
-%% @hidden
-paddr(#{addr := #{addr := Address, port := Port}}) ->
-	{Address, Port};
-paddr(#{addr := Address}) ->
-	Address;
-paddr(_Other) ->
-	undefined.
 
 %% @hidden
 %% 	inet's name on the left, the socket module's counter on the right.
@@ -664,7 +659,7 @@ paddrinfo(<<Assoc:32/native-signed, Address:128/binary,
 		State:32/native-signed, Cwnd:32/native, Srtt:32/native,
 		Rto:32/native, Mtu:32/native, _/binary>>) ->
 	#sctp_paddrinfo{assoc_id = Assoc, address = sockaddr_in(Address),
-			state = paddr_state(State), cwnd = Cwnd, srtt = Srtt,
+			state = path_state(State), cwnd = Cwnd, srtt = Srtt,
 			rto = Rto, mtu = Mtu};
 paddrinfo(_Other) ->
 	undefined.
@@ -692,7 +687,24 @@ state(8) -> shutdown_ack_sent;
 state(N) -> N.
 
 %% @hidden
-paddr_state(0) -> inactive;
-paddr_state(1) -> active;
-paddr_state(2) -> unconfirmed;
-paddr_state(N) -> N.
+%% 	The state of one peer address. The runtime hands this over as an
+%% 	integer where it hands the association's own state over as an
+%% 	atom, so the numbers from <linux/sctp.h> are named here. Two of
+%% 	them decide whether an association lives: m3ua notes the peer's
+%% 	address on `addr_confirmed' and takes the association down on
+%% 	`addr_unreachable'.
+paddr_state(0) -> addr_available;
+paddr_state(1) -> addr_unreachable;
+paddr_state(2) -> addr_removed;
+paddr_state(3) -> addr_added;
+paddr_state(4) -> addr_made_prim;
+paddr_state(5) -> addr_confirmed;
+paddr_state(State) -> State.
+
+%% @hidden
+%% 	And the state of a path, as SCTP_GET_PEER_ADDR_INFO reports it,
+%% 	which is a different enumeration entirely.
+path_state(0) -> inactive;
+path_state(1) -> active;
+path_state(2) -> unconfirmed;
+path_state(N) -> N.
