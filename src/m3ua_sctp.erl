@@ -26,6 +26,12 @@
 %%% 	`socket' module can bind a device per socket, which is how FRR
 %%% 	holds sessions in dozens of VRFs from one process.
 %%%
+%%% 	`{device, "sig"}' in the option list is that binding. Give it and
+%%% 	the beam need not run inside the VRF at all, which is worth more
+%%% 	than tidiness: `ip vrf exec' takes loopback with it, and with
+%%% 	loopback go epmd, distribution and every way of asking a running
+%%% 	node a question.
+%%%
 %%% 	== What the caller still sees ==
 %%%
 %%% 	The four state machines keep the `gen_sctp' option lists and the
@@ -411,6 +417,17 @@ setopt(_Socket, {port, _}) ->
 setopt(_Socket, inet) ->
 	ok;
 setopt(_Socket, inet6) ->
+	ok;
+setopt(Socket, {device, Device}) when is_list(Device) ->
+	%% What the whole transport change was for. Bound into a VRF the
+	%% socket reaches the signalling network while the beam stays in
+	%% the default VRF, where loopback works -- and with loopback come
+	%% epmd, distribution and every way of asking a running node a
+	%% question. Measured on the host, unprivileged, no CAP_NET_RAW.
+	%% It goes on before the bind, which is why every option in this
+	%% list is applied before open/1 binds.
+	socket:setopt(Socket, {socket, bindtodevice}, Device);
+setopt(_Socket, {device, undefined}) ->
 	ok;
 setopt(Socket, {reuseaddr, Boolean}) ->
 	socket:setopt(Socket, socket, reuseaddr, Boolean);
