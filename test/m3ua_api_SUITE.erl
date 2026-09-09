@@ -97,7 +97,8 @@ sequences() ->
 %% Returns a list of all test cases in this test suite.
 %%
 all() ->
-	[start, stop, listen, connect, release, getstat_ep, getstat_assoc,
+	[start, stop, listen, connect, release, protocol_identifier,
+			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
 			asp_inactive_to_down, asp_active_to_down,
 			asp_active_to_inactive, get_sctp_status, get_ep,
@@ -204,6 +205,44 @@ asp_down(_Config) ->
 	ok = m3ua:asp_down(ClientEP, Assoc),
 	ok = m3ua:stop(ClientEP),
 	ok = m3ua:stop(ServerEP).
+
+protocol_identifier() ->
+	[{userdata, [{doc, "The M3UA payload protocol identifier reaches the peer."}]}].
+
+protocol_identifier(_Config) ->
+	%% A plain SCTP socket standing in for a signalling gateway. The
+	%% point is to read what goes on the wire rather than ask m3ua
+	%% what it believes it sent: the identifier is how a peer tells
+	%% M3UA from anything else sharing the port, and it can be sent as
+	%% zero without one association failing to come up or one message
+	%% failing to arrive. m2pa carried a zero for a while for exactly
+	%% that reason -- nothing was watching this.
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	ok = gen_sctp:listen(Peer, true),
+	{ok, {_, Port}} = inet:sockname(Peer),
+	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
+	ok = receive
+		{sctp, Peer, _, _, {_, #sctp_assoc_change{state = comm_up}}} ->
+			ok
+	after
+		4000 ->
+			{error, no_association}
+	end,
+	[Assoc] = m3ua:get_assoc(EP),
+	%% ASP UP is the first thing m3ua puts on the wire, and nothing
+	%% here will acknowledge it, so ask for it and do not wait.
+	_ = spawn(fun() -> catch m3ua:asp_up(EP, Assoc) end),
+	3 = receive
+		{sctp, Peer, _, _, {[#sctp_sndrcvinfo{ppid = Ppid}], Data}}
+				when is_binary(Data) ->
+			Ppid
+	after
+		4000 ->
+			{error, nothing_sent}
+	end,
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
 
 getstat_ep() ->
 	[{userdata, [{doc, "Get SCTP option statistics for an endpoint."}]}].
