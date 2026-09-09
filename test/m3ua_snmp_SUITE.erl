@@ -40,12 +40,12 @@
 %%
 suite() ->
 	Port = rand:uniform(32767) + 32768,
-	[{userdata, [{doc, "Test suite for SNMP agent in SigScale M3UA"}]},
+	[{userdata, [{doc, "Test suite for the SNMP agent in m3ua."}]},
 	{require, snmp_mgr_agent, snmp},
 	{default_config, snmp,
 			[{start_agent, true},
 			{agent_udp, Port},
-			{agent_engine_id, sigscale_snmp_lib:engine_id()},
+			{agent_engine_id, engine_id()},
 			{users,
 					[{m3ua_mibs_test, [snmpm_user_default, []]}]},
 			{managed_agents,
@@ -71,16 +71,28 @@ init_per_suite(Config) ->
 	ok = application:set_env(mnesia, dir, PrivDir),
 	{ok, [m3ua_asp, m3ua_as]} = m3ua_app:install(),
 	ok = ct_snmp:start(Config, snmp_mgr_agent, snmp_app),
-	ok = sigscale_mib:load(),
 	ok = application:start(inets),
 	ok = application:start(m3ua),
 	DataDir = filename:absname(?config(data_dir, Config)),
 	TestDir = filename:dirname(DataDir),
 	BuildDir = filename:dirname(TestDir),
 	MibDir =  BuildDir ++ "/priv/mibs/",
-	Mibs = [MibDir ++ "SIGSCALE-M3UA-MIB"],
+	%% Our own arc first: MTXC-M3UA-MIB hangs off it, and a manager
+	%% that has not read it reports numbers where names should be.
+	Mibs = [MibDir ++ "MTXC-SMI", MibDir ++ "MTXC-M3UA-MIB"],
 	ok = ct_snmp:load_mibs(Mibs),
 	Config.
+
+-spec engine_id() -> string().
+%% @doc An SNMP engine identifier for the agent under test.
+%%
+%% 	RFC 3411 spells it out: the enterprise number with the top bit
+%% 	set, a format octet, then whatever that format calls for. 66575
+%% 	is MTX Connect, registered with IANA; 4 is the text format.
+engine_id() ->
+	PEN = 66575,
+	[128 bor (PEN bsr 24), (PEN bsr 16) band 255,
+			(PEN bsr 8) band 255, PEN band 255, 4] ++ "m3ua".
 
 -spec end_per_suite(Config :: [tuple()]) -> any().
 %% Cleanup after the whole suite.

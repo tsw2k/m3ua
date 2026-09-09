@@ -49,7 +49,6 @@ init_per_suite(Config) ->
 	ok = application:set_env(mnesia, dir, PrivDir),
 	{ok, [m3ua_asp, m3ua_as]} = m3ua_app:install(),
 	ok = application:start(snmp),
-	ok = application:load(sigscale_mibs),
 	ok = application:start(inets),
 	ok = application:start(m3ua),
 	Config.
