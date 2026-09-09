@@ -214,9 +214,10 @@ handle_info({sctp, Socket, PeerAddr, PeerPort,
 		{_AncData, #sctp_assoc_change{state = comm_up} = AssocChange}},
 		listening, #statedata{fsm_sup = FsmSup, socket = Socket} = StateData) ->
 	accept(Socket, PeerAddr, PeerPort, AssocChange, FsmSup, StateData);
-handle_info({sctp, _Socket, _PeerAddr, _PeerPort,
-		{_AncData, #sctp_paddr_change{}}}, StateName,
-		#statedata{receiver = Receiver} = StateData) ->
+handle_info({sctp, _Socket, _PeerAddr, _PeerPort, {_AncData, Event}},
+		StateName, #statedata{receiver = Receiver} = StateData)
+		when is_record(Event, sctp_paddr_change);
+		is_record(Event, sctp_adaptation_event) ->
 	m3ua_receiver:replenish(Receiver, once),
 	{next_state, StateName, StateData};
 handle_info({sctp_error, Socket, PeerAddr, PeerPort,

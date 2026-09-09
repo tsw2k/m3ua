@@ -279,6 +279,17 @@ handle_info({sctp, Socket, _PeerAddr, _PeerPort,
 	NewStateData = StateData#statedata{socket = undefined,
 			receiver = undefined},
 	{next_state, connecting, NewStateData, ?RETRY_WAIT};
+handle_info({sctp, Socket, _PeerAddr, _PeerPort, {_AncData, Event}},
+		StateName, #statedata{socket = Socket,
+		receiver = Receiver} = StateData)
+		when is_record(Event, sctp_adaptation_event);
+		is_record(Event, sctp_paddr_change) ->
+	%% Linux queues the adaptation layer indication ahead of the
+	%% association's own comm_up, so this arrives while still
+	%% connecting and says nothing about whether the association will
+	%% come up. Note it by asking for the next message.
+	m3ua_receiver:replenish(Receiver, once),
+	{next_state, StateName, StateData};
 handle_info({'EXIT', Receiver, Reason}, _StateName,
 		#statedata{receiver = Receiver, socket = Socket} = StateData)
 		when Receiver /= undefined ->
