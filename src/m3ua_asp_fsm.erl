@@ -494,12 +494,12 @@ down(timeout, #statedata{ep = EP, assoc = Assoc, receiver = undefined,
 	{next_state, down, StateData#statedata{cb_state = NewCbState,
 			receiver = Receiver}};
 down({'M-ASP_UP', request, Ref, From},
-		#statedata{ppid = Ppid, req = undefined, socket = Socket,
+		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
 	AspUp = #m3ua{class = ?ASPSMMessage,
 			type = ?ASPSMASPUP, params = <<>>},
 	Packet = m3ua_codec:m3ua(AspUp),
-	case m3ua_sctp:send(Socket, 0, Ppid, Packet) of
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			Req = {'M-ASP_UP', Ref, From},
 			UpOut = maps:get(up_out, Count, 0),
@@ -568,11 +568,11 @@ inactive({'M-RK_REG', request, _, _, _, _, _, _, _} = Event,
 		#statedata{req = undefined} = StateData) ->
 	handle_reg(Event, inactive, StateData);
 inactive({'M-ASP_ACTIVE', request, Ref, From},
-		#statedata{ppid = Ppid, req = undefined, socket = Socket,
+		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
 	AspActive = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC},
 	Message = m3ua_codec:m3ua(AspActive),
-	case m3ua_sctp:send(Socket, 0, Ppid, Message) of
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Message) of
 		ok ->
 			Req = {'M-ASP_ACTIVE', Ref, From},
 			ActiveOut = maps:get(active_out, Count, 0),
@@ -586,11 +586,11 @@ inactive({'M-ASP_ACTIVE', request, Ref, From},
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
 inactive({'M-ASP_DOWN', request, Ref, From},
-		#statedata{ppid = Ppid, req = undefined, socket = Socket,
+		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
 	AspDown = #m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN},
 	Message = m3ua_codec:m3ua(AspDown),
-	case m3ua_sctp:send(Socket, 0, Ppid, Message) of
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Message) of
 		ok ->
 			Req = {'M-ASP_DOWN', Ref, From},
 			DownOut = maps:get(down_out, Count, 0),
@@ -659,7 +659,7 @@ active(timeout, #statedata{req = {AspOp, Ref, From},
 	{next_state, down, NewStateData};
 active({'MTP-TRANSFER', request, Ref, From,
 		{Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
-		#statedata{ppid = Ppid, receiver = Receiver, socket = Socket, assoc = Assoc,
+		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, socket = Socket, assoc = Assoc,
 		ep = EP, out_streams = NumStreams,
 		rks = RKs, use_rc = UseRC,
 		callback = CbMod, cb_state = CbState,
@@ -685,7 +685,7 @@ active({'MTP-TRANSFER', request, Ref, From,
 		undefined ->
 			SLS rem NumStreams
 	end,
-	case m3ua_sctp:send(Socket, Stream1, Ppid, Packet) of
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, Stream1, Ppid, Packet) of
 		ok ->
 			CbArgs = [From, Ref, Stream1,
 					RC, OPC, DPC, NI, SI, SLS, Data, CbState],
@@ -707,11 +707,11 @@ active({'MTP-TRANSFER', request, Ref, From,
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
 active({'M-ASP_INACTIVE', request, Ref, From},
-		#statedata{ppid = Ppid, req = undefined, socket = Socket,
+		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
 	AspInActive = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIA},
 	Message = m3ua_codec:m3ua(AspInActive),
-	case m3ua_sctp:send(Socket, 0, Ppid, Message) of
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Message) of
 		ok ->
 			Req = {'M-ASP_INACTIVE', Ref, From},
 			InactiveOut = maps:get(inactive_out, Count, 0),
@@ -725,11 +725,11 @@ active({'M-ASP_INACTIVE', request, Ref, From},
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
 active({'M-ASP_DOWN', request, Ref, From},
-		#statedata{ppid = Ppid, req = undefined, socket = Socket,
+		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
 	AspDown = #m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN},
 	Message = m3ua_codec:m3ua(AspDown),
-	case m3ua_sctp:send(Socket, 0, Ppid, Message) of
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Message) of
 		ok ->
 			Req = {'M-ASP_DOWN', Ref, From},
 			DownOut = maps:get(down_out, Count, 0),
@@ -764,7 +764,7 @@ active({AspOp, request, Ref, From},
 %% @private
 %%
 active({'MTP-TRANSFER', request, {Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
-		{From, Ref}, #statedata{ppid = Ppid, receiver = Receiver, socket = Socket, assoc = Assoc,
+		{From, Ref}, #statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, socket = Socket, assoc = Assoc,
 		ep = EP, out_streams = NumStreams,
 		rks = RKs, use_rc = UseRC, callback = CbMod,
 		cb_state = CbState, count = Count} = StateData) ->
@@ -789,7 +789,7 @@ active({'MTP-TRANSFER', request, {Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
 		undefined ->
 			SLS rem NumStreams
 	end,
-	case m3ua_sctp:send(Socket, Stream1, Ppid, Packet) of
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, Stream1, Ppid, Packet) of
 		ok ->
 			CbArgs = [From, Ref, Stream1, RC, OPC, DPC, NI, SI, SLS, Data, CbState],
 			case m3ua_callback:cb(send, CbMod, CbArgs) of
@@ -847,11 +847,11 @@ handle_event({'M-SCTP_STATUS', request, Ref, From}, StateName,
 			{next_state, StateName, StateData}
 	end;
 handle_event({'M-SSNM', Type, Params}, StateName,
-		#statedata{socket = Socket, ppid = Ppid, receiver = Receiver, active = Active, ep = EP,
+		#statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active, ep = EP,
 		assoc = Assoc, count = Count} = StateData) ->
 	Message = #m3ua{class = ?SSNMMessage, type = Type, params = Params},
 	Packet = m3ua_codec:m3ua(Message),
-	case m3ua_sctp:send(Socket, 0, Ppid, Packet) of
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			ok = m3ua_receiver:replenish(Receiver, Active),
 			DaudOut = maps:get(daud_out, Count, 0),
@@ -1125,7 +1125,7 @@ report_discarding(Cb, EP, Assoc) ->
 
 %% @hidden
 handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
-		StateName, #statedata{ppid = Ppid, static = false, socket = Socket,
+		StateName, #statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, static = false, socket = Socket,
 		assoc = Assoc, ep = EP} = StateData)  ->
 	RK = #m3ua_routing_key{rc = RC, na = NA, tmt = Mode, key = Keys,
 			lrk_id = generate_lrk_id(), as = AS},
@@ -1133,7 +1133,7 @@ handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
 	Params = m3ua_codec:parameters([{?RoutingKey, RoutingKey}]),
 	RegReq = #m3ua{class = ?RKMMessage, type = ?RKMREGREQ, params = Params},
 	Message = m3ua_codec:m3ua(RegReq),
-	case m3ua_sctp:send(Socket, 0, Ppid, Message) of
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Message) of
 		ok ->
 			Req = {'M-RK_REG', Ref, From, RK},
 			NewStateData = StateData#statedata{req = Req},
@@ -1420,12 +1420,12 @@ handle_asp(#m3ua{class = ?MGMTMessage, type = ?MGMTError, params = Params},
 	ok = m3ua_receiver:replenish(Receiver, Active),
 	{next_state, StateName, StateData};
 handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMBEAT, params = Params},
-		StateName, _Stream, #statedata{socket = Socket, ppid = Ppid, receiver = Receiver, active = Active,
+		StateName, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
 	BeatAck = #m3ua{class = ?ASPSMMessage,
 			type = ?ASPSMBEATACK, params = Params},
 	Packet = m3ua_codec:m3ua(BeatAck),
-	case m3ua_sctp:send(Socket, 0, Ppid, Packet) of
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			ok = m3ua_receiver:replenish(Receiver, Active),
 			UpIn = maps:get(beat_in, Count, 0),

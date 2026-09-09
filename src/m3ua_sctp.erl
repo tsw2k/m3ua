@@ -65,7 +65,7 @@
 -copyright('Copyright (c) 2026 MTX Connect S.a r.l.').
 
 -export([open/1, listen/1, close/1, connect_init/4, peeloff/2,
-		controlling_process/2, send/4, recvmsg/2, sockname/1,
+		controlling_process/2, send/5, recvmsg/2, sockname/1,
 		getstat/1, getstat/2, status/2, ppid/1, error_string/1]).
 
 -include("m3ua.hrl").
@@ -201,24 +201,32 @@ peeloff(Socket, Assoc) ->
 controlling_process(Socket, Pid) ->
 	socket:setopt(Socket, otp, controlling_process, Pid).
 
--spec send(Socket, Stream, Ppid, Data) -> Result
+-spec send(Socket, Peer, Stream, Ppid, Data) -> Result
 	when
 		Socket :: sock(),
+		Peer :: {inet:ip_address(), inet:port_number()},
 		Stream :: non_neg_integer(),
 		Ppid :: non_neg_integer(),
 		Data :: binary() | iolist(),
 		Result :: ok | {error, Reason :: term()}.
 %% @doc Send on one stream of an association.
 %%
-%% 	`Socket' is peeled off or connected, so no address is needed --
-%% 	on a one-to-many socket an unaddressed send answers `epipe'.
-send(Socket, Stream, Ppid, Data) when is_binary(Data) ->
-	Msg = #{iov => [Data],
+%% 	The destination is always named. An sgp holds a socket peeled off
+%% 	the listening one and an asp holds the one it connected on, and
+%% 	those are not the same kind of socket: measured, an unaddressed
+%% 	send answers `epipe' on the one the asp holds and works on the
+%% 	one the sgp holds, while an addressed send works on both. One
+%% 	rule rather than two, and nowhere the difference has to be
+%% 	remembered.
+send(Socket, {Address, Port}, Stream, Ppid, Data) when is_binary(Data) ->
+	Msg = #{addr => #{family => family(Address), addr => Address,
+					port => Port},
+			iov => [Data],
 			ctrl => [#{level => sctp, type => ?SCTP_SNDINFO,
 					data => sndinfo(Stream, Ppid)}]},
 	socket:sendmsg(Socket, Msg);
-send(Socket, Stream, Ppid, Data) when is_list(Data) ->
-	send(Socket, Stream, Ppid, iolist_to_binary(Data)).
+send(Socket, Peer, Stream, Ppid, Data) when is_list(Data) ->
+	send(Socket, Peer, Stream, Ppid, iolist_to_binary(Data)).
 
 -spec recvmsg(Socket, Timeout) -> Result
 	when
@@ -344,7 +352,11 @@ error_string(_) -> "Unknown Error".
 %%----------------------------------------------------------------------
 
 %% @hidden
-family(Options) ->
+family(Address) when tuple_size(Address) == 4 ->
+	inet;
+family(Address) when tuple_size(Address) == 8 ->
+	inet6;
+family(Options) when is_list(Options) ->
 	case lists:keyfind(ip, 1, Options) of
 		{ip, Address} when tuple_size(Address) == 8 ->
 			inet6;
@@ -506,8 +518,9 @@ flags(L) when is_list(L) -> 0.
 
 %% @hidden
 %% 	One received message, in the shape gen_sctp delivered it.
-delivered(#{notification := Notification}) ->
-	{undefined, undefined, [], notification(Notification)};
+delivered(#{notification := Notification} = Msg) ->
+	Address = maps:get(addr, Msg, undefined),
+	{address(Address), port(Address), [], notification(Notification)};
 delivered(#{addr := Address, iov := Iov, ctrl := Ctrl}) ->
 	{address(Address), port(Address), ancillary(Ctrl),
 			iolist_to_binary(Iov)};
