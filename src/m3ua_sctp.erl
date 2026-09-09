@@ -94,6 +94,20 @@
 -define(SCTP_SNDRCV, 1).
 -define(SCTP_SNDINFO, 2).
 
+%% What gen_sctp subscribes to when it opens a socket, measured on
+%% both: a fresh socket-module socket has every event off, a fresh
+%% gen_sctp socket has the first seven on. gen_sctp then applies the
+%% caller's record on top of that, so an option list that named one
+%% event kept the rest -- and the same list handed to a bare socket
+%% would have subscribed to that one event alone. The baseline goes on
+%% first here so the option lists the state machines build keep the
+%% meaning they have always had.
+-define(BASELINE, #sctp_event_subscribe{data_io_event = true,
+		association_event = true, address_event = true,
+		send_failure_event = true, peer_error_event = true,
+		shutdown_event = true, partial_delivery_event = true,
+		adaptation_layer_event = false}).
+
 %% struct sctp_status is 176 octets here, not the 184 that adding up
 %% the header would suggest; the size is measured, and the fields it
 %% is read for are cross-checked against inet:getopts/2 on the same
@@ -118,7 +132,7 @@ open(Options) when is_list(Options) ->
 	Family = family(Options),
 	case socket:open(Family, seqpacket, sctp) of
 		{ok, Socket} ->
-			case setopts(Socket, Options) of
+			case setopts(Socket, [{sctp_events, ?BASELINE} | Options]) of
 				ok ->
 					bind(Socket, Family, Options);
 				{error, Reason} ->
@@ -396,8 +410,20 @@ setopt(Socket, {sctp_nodelay, Boolean}) ->
 	socket:setopt_native(Socket, {?SOL_SCTP, ?SCTP_NODELAY},
 			<<(boolean(Boolean)):32/native>>);
 setopt(Socket, {sctp_events, #sctp_event_subscribe{} = Events}) ->
-	socket:setopt_native(Socket, {?SOL_SCTP, ?SCTP_EVENTS},
-			events(Events));
+	%% Read, modify, write. The record's fields default to `undefined',
+	%% not to `false', and a caller naming one event means "and this
+	%% one too" rather than "only this one". Writing the record out
+	%% whole turns the rest off: m3ua asks for the adaptation layer
+	%% event and would silently lose data_io and association with it,
+	%% at which point a listening socket is never told an association
+	%% came up and simply waits.
+	case socket:getopt_native(Socket, {?SOL_SCTP, ?SCTP_EVENTS}, 11) of
+		{ok, Current} ->
+			socket:setopt_native(Socket, {?SOL_SCTP, ?SCTP_EVENTS},
+					events(Events, Current));
+		{error, _Reason} = Error ->
+			Error
+	end;
 setopt(Socket, {sctp_adaptation_layer,
 		#sctp_setadaptation{adaptation_ind = Indication}}) ->
 	socket:setopt_native(Socket, {?SOL_SCTP, ?SCTP_ADAPTATION_LAYER},
@@ -412,18 +438,26 @@ setopt(_Socket, _Option) ->
 
 %% @hidden
 %% 	`struct sctp_event_subscribe' is eleven octets, one per event, in
-%% 	the order the header declares them. m3ua subscribes to rather more
-%% 	than m2pa does: it acts on send failures, on the peer's errors and
-%% 	on the adaptation layer indication.
+%% 	the order the header declares them, and `Current' is what the
+%% 	socket already has. Only the fields the caller named are changed.
 events(#sctp_event_subscribe{data_io_event = DataIo,
 		association_event = Assoc, address_event = Address,
 		send_failure_event = SendFailure, peer_error_event = PeerError,
 		shutdown_event = Shutdown, partial_delivery_event = Partial,
-		adaptation_layer_event = Adaptation}) ->
-	<<(boolean(DataIo)), (boolean(Assoc)), (boolean(Address)),
-			(boolean(SendFailure)), (boolean(PeerError)),
-			(boolean(Shutdown)), (boolean(Partial)),
-			(boolean(Adaptation)), 0, 0, 0>>.
+		adaptation_layer_event = Adaptation},
+		<<DataIo0, Assoc0, Address0, SendFailure0, PeerError0,
+		Shutdown0, Partial0, Adaptation0, Rest/binary>>) ->
+	<<(flag(DataIo, DataIo0)), (flag(Assoc, Assoc0)),
+			(flag(Address, Address0)), (flag(SendFailure, SendFailure0)),
+			(flag(PeerError, PeerError0)), (flag(Shutdown, Shutdown0)),
+			(flag(Partial, Partial0)), (flag(Adaptation, Adaptation0)),
+			Rest/binary>>.
+
+%% @hidden
+flag(undefined, Current) -> Current;
+flag(true, _Current) -> 1;
+flag(false, _Current) -> 0;
+flag(N, _Current) when is_integer(N) -> N.
 
 %% @hidden
 boolean(true) -> 1;
