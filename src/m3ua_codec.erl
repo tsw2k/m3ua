@@ -614,7 +614,7 @@ error_code(destination_status_unknown) -> <<20:32>>;
 error_code(invalid_network_appearance) -> <<21:32>>;
 error_code(missing_parameter) -> <<22:32>>;
 error_code(invalid_routing_context) -> <<25:32>>;
-error_code(no_configure_as_for_asp) -> <<26:32>>.
+error_code(no_configured_as_for_asp) -> <<26:32>>.
 
 -spec protocol_data(ProtocolData) -> ProtocolData
 	when

@@ -74,7 +74,8 @@ sequences() ->
 %% Returns a list of all test cases in this test suite.
 %%
 all() ->
-	[asp_up, asp_up_ack, asp_down, asp_down_ack, asp_active, asp_active_ack].
+	[asp_up, asp_up_ack, asp_down, asp_down_ack, asp_active, asp_active_ack,
+			error_codes].
 
 %%---------------------------------------------------------------------
 %%  Test cases
@@ -160,6 +161,28 @@ asp_active_ack(_Config) ->
 	#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPACACK,
 			params = Params} = m3ua_codec:m3ua(BinAspActiveAck),
 	Parameters = m3ua_codec:parameters(Params).
+
+error_codes() ->
+	[{userdata, [{doc, "ERR Message encoding and decoding, for every error code"}]}].
+
+error_codes(_Config) ->
+	%% RFC4666, Section-3.8.1. Each code starts from the wire rather
+	%% than from the codec's own names, so that a name spelled one way
+	%% to decode and another to encode fails here, not on the first
+	%% ERR that carries it.
+	Codes = [1, 3, 4, 5, 6, 7, 9, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26],
+	F = fun(Code) ->
+			BinErr = <<1, 0, ?MGMTMessage, ?MGMTError, 16:32,
+					?ErrorCode:16, 8:16, Code:32>>,
+			#m3ua{class = ?MGMTMessage, type = ?MGMTError,
+					params = Params} = m3ua_codec:m3ua(BinErr),
+			[{?ErrorCode, ErrorCode}] = m3ua_codec:parameters(Params),
+			true = is_atom(ErrorCode),
+			RecErr = #m3ua{class = ?MGMTMessage, type = ?MGMTError,
+					params = [{?ErrorCode, ErrorCode}]},
+			BinErr = m3ua_codec:m3ua(RecErr)
+	end,
+	lists:foreach(F, Codes).
 
 
 %%---------------------------------------------------------------------
