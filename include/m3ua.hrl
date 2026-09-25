@@ -136,6 +136,10 @@
 		status :: undefined | atom(),
 		rc :: undefined | 0..4294967295}).
 
+-record(deregistration_result,
+		{rc :: undefined | 0..4294967295,
+		status :: undefined | atom()}).
+
 -record(m3ua_as_asp,
 		{id :: undefined | pos_integer(),
 		fsm :: pid(),

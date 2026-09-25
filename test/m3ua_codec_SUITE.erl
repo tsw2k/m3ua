@@ -75,7 +75,7 @@ sequences() ->
 %%
 all() ->
 	[asp_up, asp_up_ack, asp_down, asp_down_ack, asp_active, asp_active_ack,
-			error_codes].
+			error_codes, dereg_req, dereg_rsp].
 
 %%---------------------------------------------------------------------
 %%  Test cases
@@ -183,6 +183,36 @@ error_codes(_Config) ->
 			BinErr = m3ua_codec:m3ua(RecErr)
 	end,
 	lists:foreach(F, Codes).
+
+dereg_req() ->
+	[{userdata, [{doc, "DEREG REQ Message encoding and decoding"}]}].
+
+dereg_req(_Config) ->
+	RCs = [rand:uniform(16#ffffffff) || _ <- lists:seq(1, 3)],
+	Parameters = [{?RoutingContext, RCs}],
+	RecDeregReq = #m3ua{class = ?RKMMessage, type = ?RKMDEREGREQ,
+			params = Parameters},
+	BinDeregReq = m3ua_codec:m3ua(RecDeregReq),
+	{ok, #m3ua{class = ?RKMMessage, type = ?RKMDEREGREQ,
+			params = Params}} = m3ua_codec:check(BinDeregReq),
+	Parameters = m3ua_codec:parameters(Params).
+
+dereg_rsp() ->
+	[{userdata, [{doc, "DEREG RSP Message encoding and decoding, for every status"}]}].
+
+dereg_rsp(_Config) ->
+	Statuses = [deregistered, unknown, invalid_rc, permission_denied,
+			not_registered, asp_currently_active],
+	Parameters = [{?DeregistrationResult, #deregistration_result{
+			rc = rand:uniform(16#ffffffff), status = Status}}
+			|| Status <- Statuses],
+	RecDeregRsp = #m3ua{class = ?RKMMessage, type = ?RKMDEREGRSP,
+			params = Parameters},
+	BinDeregRsp = m3ua_codec:m3ua(RecDeregRsp),
+	0 = size(BinDeregRsp) rem 4,
+	{ok, #m3ua{class = ?RKMMessage, type = ?RKMDEREGRSP,
+			params = Params}} = m3ua_codec:check(BinDeregRsp),
+	Parameters = m3ua_codec:parameters(Params).
 
 
 %%---------------------------------------------------------------------

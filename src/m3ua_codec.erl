@@ -277,6 +277,10 @@ parameters([{?ProtocolData, #protocol_data{} = ProtocolData} | T], Acc) ->
 parameters([{?RegistrationStatus, RegistrationStatus} | T], Acc) ->
 	RegStatus = registration_status(RegistrationStatus),
 	parameters(T, <<Acc/binary, ?RegistrationStatus:16, 8:16, RegStatus/binary>>);
+parameters([{?DeregistrationResult, #deregistration_result{} = DeregResult} | T], Acc) ->
+	DR = deregistration_result(DeregResult),
+	Len = size(DR) + 4,
+	parameters(T, <<Acc/binary, ?DeregistrationResult:16, Len:16, DR/binary>>);
 parameters([{?DeregistrationStatus, _} | T], Acc) ->
 	parameters(T, Acc);
 parameters(<<>>, Acc) ->
@@ -453,6 +457,8 @@ parameter(?ProtocolData, PD, Acc) ->
 	[{?ProtocolData, protocol_data(PD)} | Acc];
 parameter(?RegistrationStatus, RegistrationStatus, Acc) ->
 	[{?RegistrationStatus, registration_status(RegistrationStatus)} | Acc];
+parameter(?DeregistrationResult, DeregResult, Acc) ->
+	[{?DeregistrationResult, deregistration_result(DeregResult)} | Acc];
 parameter(?DeregistrationStatus, _, Acc) ->
 	Acc;
 parameter(_, _, Acc) ->
@@ -747,4 +753,40 @@ registration_result1([rc | T], #registration_result{rc = RC} = RR, Acc) ->
 	registration_result1(T, RR, <<Acc/binary, ?RoutingContext:16, 8:16, RC:32>>);
 registration_result1([], _RR, Acc) ->
 	Acc.
+
+-spec deregistration_status(DeregistrationStatus) -> DeregistrationStatus
+	when
+		DeregistrationStatus :: binary() | atom().
+%% @doc codec for deregistration status
+%% RFC4666, Section-3.6.4
+%% @hidden
+%%
+deregistration_status(<<0:32>>) -> deregistered;
+deregistration_status(<<1:32>>) -> unknown;
+deregistration_status(<<2:32>>) -> invalid_rc;
+deregistration_status(<<3:32>>) -> permission_denied;
+deregistration_status(<<4:32>>) -> not_registered;
+deregistration_status(<<5:32>>) -> asp_currently_active;
+deregistration_status(deregistered) -> <<0:32>>;
+deregistration_status(unknown) -> <<1:32>>;
+deregistration_status(invalid_rc) -> <<2:32>>;
+deregistration_status(permission_denied) -> <<3:32>>;
+deregistration_status(not_registered) -> <<4:32>>;
+deregistration_status(asp_currently_active) -> <<5:32>>.
+
+-spec deregistration_result(DeregResult) -> DeregResult
+	when
+		DeregResult :: binary() | #deregistration_result{}.
+%% @doc codec for a deregistration result: one routing context and its
+%% 	status, in that order and nothing else.
+%% RFC4666, Section-3.6.4
+%% @hidden
+deregistration_result(<<?RoutingContext:16, 8:16, RC:32,
+		?DeregistrationStatus:16, 8:16, Status:4/binary>>) ->
+	#deregistration_result{rc = RC, status = deregistration_status(Status)};
+deregistration_result(#deregistration_result{rc = RC, status = Status})
+		when is_integer(RC), is_atom(Status) ->
+	Status1 = deregistration_status(Status),
+	<<?RoutingContext:16, 8:16, RC:32,
+			?DeregistrationStatus:16, 8:16, Status1/binary>>.
 
