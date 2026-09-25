@@ -1137,6 +1137,37 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP},
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
+%% RFC4666, Section-4.3.4.1: an ASP UP at an active asp is acknowledged,
+%% reported as unexpected, and takes the asp out of service in every
+%% application server it is in.
+handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP},
+		active, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid,
+		assoc = Assoc, ep = EP, callback = CbMod, cb_state = CbState,
+		count = Count} = StateData) ->
+	?LOG_NOTICE("ASPUP received in the active state",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			reason => unexpected_message}),
+	AspUpAck = #m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK},
+	Packet = m3ua_codec:m3ua(AspUpAck),
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+		ok ->
+			NewStateData = state_traffic_maint(undefined, asp_inactive, StateData),
+			CbArgs = [CbState],
+			{ok, NewCbState} = m3ua_callback:cb(asp_inactive, CbMod, CbArgs),
+			UpIn = maps:get(up_in, Count, 0),
+			UpAckOut = maps:get(up_ack_out, Count, 0),
+			NewCount = maps:put(up_in, UpIn + 1, Count),
+			NextCount = maps:put(up_ack_out, UpAckOut + 1, NewCount),
+			NextStateData = NewStateData#statedata{cb_state = NewCbState,
+					count = NextCount},
+			report_carrying(active, inactive, EP, Assoc),
+			send_error(unexpected_message, inactive, NextStateData);
+		{error, eagain} ->
+			% @todo flow control
+			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
+		{error, Reason} ->
+			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
+	end;
 handle_sgp(#m3ua{class = ?RKMMessage, type = ?RKMREGREQ, params = Params},
 		StateName, _Stream, StateData)
 		when StateName == inactive; StateName == active ->

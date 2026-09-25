@@ -100,6 +100,7 @@ all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
+			sgp_asp_up_active,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
 			asp_inactive_to_down, asp_active_to_down,
@@ -423,6 +424,34 @@ sgp_unexpected(_Config) ->
 			16:32, ?AffectedPointCode:16, 8:16, 0, 1:24>>),
 	[Assoc] = m3ua:get_assoc(EP),
 	{ok, #{unexpected_in := 4, error_out := 4}} = m3ua:getcount(EP, Assoc),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+sgp_asp_up_active() ->
+	[{userdata, [{doc, "An ASP UP at an active asp is acknowledged, answered with an ERR, and leaves the asp inactive (RFC 4666 4.3.4.1)."}]}].
+
+sgp_asp_up_active(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_asp(),
+	AspUp = m3ua_codec:m3ua(#m3ua{class = ?ASPSMMessage,
+			type = ?ASPSMASPUP, params = <<>>}),
+	AspAc = m3ua_codec:m3ua(#m3ua{class = ?ASPTMMessage,
+			type = ?ASPTMASPAC, params = <<>>}),
+	ok = raw_put(Peer, PeerAssoc, AspUp),
+	#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK} = raw_get(Peer),
+	ok = raw_put(Peer, PeerAssoc, AspAc),
+	#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPACACK} = raw_get(Peer),
+	active = m3ua:asp_status(EP, Assoc),
+	%% The ASP UP again, while active: an acknowledgement first, then
+	%% the ERR, and the asp is inactive.
+	ok = raw_put(Peer, PeerAssoc, AspUp),
+	#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK} = raw_get(Peer),
+	#m3ua{class = ?MGMTMessage, type = ?MGMTError,
+			params = Params} = raw_get(Peer),
+	unexpected_message = m3ua_codec:fetch_parameter(?ErrorCode,
+			m3ua_codec:parameters(Params)),
+	inactive = m3ua:asp_status(EP, Assoc),
+	{ok, #{up_in := 2, up_ack_out := 2, error_out := 1}}
+			= m3ua:getcount(EP, Assoc),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 
