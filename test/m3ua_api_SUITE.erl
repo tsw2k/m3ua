@@ -99,6 +99,7 @@ sequences() ->
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
 			undecodable, unexpected, registration_results, ack_timeout,
+			inactive_timeout,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
 			asp_inactive_to_down, asp_active_to_down,
@@ -360,6 +361,38 @@ ack_timeout(_Config) ->
 				end
 	end,
 	{error, timeout} = F(10),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+inactive_timeout() ->
+	[{userdata, [{doc, "An ASP Inactive that is never acknowledged times out, and the layer manager survives it."}]}].
+
+inactive_timeout(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(),
+	LM = whereis(m3ua),
+	Self = self(),
+	_ = spawn(fun() -> Self ! {asp_up, m3ua:asp_up(EP, Assoc)} end),
+	#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP} = raw_get(Peer),
+	AspUpAck = #m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK},
+	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(AspUpAck)),
+	ok = receive {asp_up, UpResult} -> UpResult after 4000 -> timeout end,
+	_ = spawn(fun() -> Self ! {asp_active, m3ua:asp_active(EP, Assoc)} end),
+	#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC} = raw_get(Peer),
+	AspAcAck = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPACACK},
+	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(AspAcAck)),
+	ok = receive {asp_active, AcResult} -> AcResult after 4000 -> timeout end,
+	%% No ASPIA ACK. The confirmation the timeout sends is the one the
+	%% layer manager takes; a malformed one would kill it.
+	_ = spawn(fun() -> Self ! {asp_inactive, m3ua:asp_inactive(EP, Assoc)} end),
+	#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIA} = raw_get(Peer),
+	{error, timeout} = receive
+		{asp_inactive, IaResult} ->
+			IaResult
+	after
+		4000 ->
+			no_answer
+	end,
+	LM = whereis(m3ua),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 

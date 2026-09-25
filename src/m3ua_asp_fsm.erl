@@ -668,7 +668,7 @@ active(timeout, #statedata{req = {'M-RK_REG', Ref, From, _RK}} = StateData) ->
 active(timeout, #statedata{req = {AspOp, Ref, From},
 		ep = EP, assoc = Assoc} = StateData)
 		when AspOp == 'M-ASP_INACTIVE'; AspOp == 'M-ASP_DOWN' ->
-	gen_server:cast(From, {AspOp, Ref, self(), {error, timeout}}),
+	gen_server:cast(From, {AspOp, confirm, Ref, {error, timeout}}),
 	NewStateData = StateData#statedata{req = undefined},
 	report_carrying(active, down, EP, Assoc),
 	{next_state, down, NewStateData};
