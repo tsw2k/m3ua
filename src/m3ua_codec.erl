@@ -127,7 +127,8 @@ m3ua(#m3ua{version = Version, class = Class, type = Type, params = Data}) when i
 		Result :: {ok, #m3ua{}} | {error, ErrorCode},
 		ErrorCode :: invalid_version | unsupported_message_class
 				| unsupported_message_type | parameter_field_error
-				| invalid_parameter_value | protocol_error.
+				| invalid_parameter_value | missing_parameter
+				| protocol_error.
 %% @doc Decode a received message, or say why it will not decode.
 %%
 %% 	{@link m3ua/1} reads the common header alone, and the parameters
@@ -149,15 +150,20 @@ check(<<1, _Reserved, Class, Type, Len:32, Data/binary>> = Message)
 check(_) ->
 	{error, protocol_error}.
 %% @hidden
-check1(#m3ua{params = Data} = M3UA) ->
-	case fields(Data) of
-		ok ->
-			try parameters(Data) of
+check1(#m3ua{class = Class, type = Type, params = Data} = M3UA) ->
+	case fields(Data, []) of
+		{ok, Tags} ->
+			case mandatory(Class, Type) -- Tags of
+				[] ->
+					try parameters(Data) of
+						_ ->
+							{ok, M3UA}
+					catch
+						_:_ ->
+							{error, invalid_parameter_value}
+					end;
 				_ ->
-					{ok, M3UA}
-			catch
-				_:_ ->
-					{error, invalid_parameter_value}
+					{error, missing_parameter}
 			end;
 		error ->
 			{error, parameter_field_error}
@@ -411,6 +417,8 @@ parameter(?Status, <<2:16, 2:16>>, Acc) ->
 	[{?Status, alternate_asp_active} | Acc];
 parameter(?Status, <<2:16, 3:16>>, Acc) ->
 	[{?Status, asp_failure} | Acc];
+parameter(?Status, _Status, _Acc) ->
+	erlang:error(badarg);
 parameter(?ASPIdentifier, <<ASPIdentifier:32>>, Acc) ->
 	[{?ASPIdentifier, ASPIdentifier} | Acc];
 parameter(?AffectedPointCode, APC, Acc) ->
@@ -477,19 +485,42 @@ message_type(_, _) ->
 	{error, unsupported_message_class}.
 
 %% @hidden
+%% 	The parameters RFC4666, Section-3 makes mandatory in each message.
+mandatory(?MGMTMessage, ?MGMTError) ->
+	[?ErrorCode];
+mandatory(?MGMTMessage, ?MGMTNotify) ->
+	[?Status];
+mandatory(?TransferMessage, ?TransferMessageData) ->
+	[?ProtocolData];
+mandatory(?SSNMMessage, ?SSNMDUPU) ->
+	[?AffectedPointCode, ?UserCause];
+mandatory(?SSNMMessage, _) ->
+	[?AffectedPointCode];
+mandatory(?RKMMessage, ?RKMREGREQ) ->
+	[?RoutingKey];
+mandatory(?RKMMessage, ?RKMREGRSP) ->
+	[?RegistrationResult];
+mandatory(?RKMMessage, ?RKMDEREGREQ) ->
+	[?RoutingContext];
+mandatory(?RKMMessage, ?RKMDEREGRSP) ->
+	[?DeregistrationResult];
+mandatory(_, _) ->
+	[].
+
+%% @hidden
 %% 	Walk the parameters as parameters/2 will, but only to see that
-%% 	each one's length stays inside the message.
-fields(<<_Tag:16, Len:16, Rest/binary>>) when Len >= 4 ->
+%% 	each one's length stays inside the message, and which are there.
+fields(<<Tag:16, Len:16, Rest/binary>>, Acc) when Len >= 4 ->
 	Skip = Len - 4 + ((4 - (Len rem 4)) rem 4),
 	case Rest of
 		<<_:Skip/binary, Next/binary>> ->
-			fields(Next);
+			fields(Next, [Tag | Acc]);
 		_ ->
 			error
 	end;
-fields(Pad) when size(Pad) < 4 ->
-	ok;
-fields(_) ->
+fields(Pad, Acc) when size(Pad) < 4 ->
+	{ok, Acc};
+fields(_, _) ->
 	error.
 
 

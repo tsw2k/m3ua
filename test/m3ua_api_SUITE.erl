@@ -263,11 +263,18 @@ undecodable(_Config) ->
 	%% An Affected Point Code with a mask other than zero.
 	invalid_parameter_value = Send(<<1, 0, ?SSNMMessage, ?SSNMDUNA,
 			16:32, ?AffectedPointCode:16, 8:16, 1, 0:24>>),
+	%% A Status nobody defined.
+	invalid_parameter_value = Send(<<1, 0, ?MGMTMessage, ?MGMTNotify,
+			16:32, ?Status:16, 8:16, 9:16, 9:16>>),
+	%% A NTFY without its Status, and DATA without its Protocol Data.
+	missing_parameter = Send(<<1, 0, ?MGMTMessage, ?MGMTNotify, 8:32>>),
+	missing_parameter = Send(<<1, 0, ?TransferMessage,
+			?TransferMessageData, 8:32>>),
 	%% An ERR with an error code nobody defined is not answered.
 	nothing_sent = Send(<<1, 0, ?MGMTMessage, ?MGMTError,
 			16:32, ?ErrorCode:16, 8:16, 99:32>>),
 	[Assoc] = m3ua:get_assoc(EP),
-	{ok, #{undecodable_in := 7, error_out := 6}} = m3ua:getcount(EP, Assoc),
+	{ok, #{undecodable_in := 10, error_out := 9}} = m3ua:getcount(EP, Assoc),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 
