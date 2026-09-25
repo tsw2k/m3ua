@@ -24,7 +24,7 @@
 -export([start/1, start/3, stop/1]).
 -export([sctp_release/2, sctp_status/2]).
 -export([getstat/1, getstat/2, getstat/3, getcount/2]).
--export([as_add/7, as_delete/1, register/6, register/7]).
+-export([as_add/7, as_delete/1, register/6, register/7, deregister/3]).
 -export([get_ep/0, get_ep/1, get_as/0, get_assoc/0, get_assoc/1]).
 -export([asp_status/2, asp_up/2, asp_down/2, asp_active/2,
 			asp_inactive/2]).
@@ -279,6 +279,30 @@ register(EndPoint, Assoc, RoutingContext, NA, Keys, Mode, AsName)
 		orelse (Mode == broadcast)) ->
 	m3ua_lm_server:register(EndPoint, Assoc,
 			RoutingContext, NA, Keys, Mode, AsName).
+
+-spec deregister(EndPoint, Assoc, RoutingContext) -> Result
+	when
+		EndPoint :: pid(),
+		Assoc :: gen_sctp:assoc_id(),
+		RoutingContext :: 0..4294967295,
+		Result :: ok | {error, Reason},
+		Reason :: term().
+%% @doc Deregister the routing key of an application server.
+%%
+%% 	At an ASP whose routing keys are registered with its peer, sends
+%% 	a DEREG REQ for `RoutingContext' and answers when the DEREG RSP
+%% 	does (RFC 4666 4.4.2); a status other than `deregistered' is the
+%% 	`Reason'. RFC 4666 has the ASP inactive in that application server
+%% 	first, and a peer may refuse with `asp_currently_active' if not.
+%%
+%% 	Where there is nothing to ask a peer -- an ASP registered
+%% 	statically, or an SGP deregistering one of its ASPs -- it is done
+%% 	locally and nothing is sent.
+%%
+deregister(EndPoint, Assoc, RoutingContext)
+		when is_pid(EndPoint), is_integer(Assoc),
+		is_integer(RoutingContext) ->
+	m3ua_lm_server:deregister(EndPoint, Assoc, RoutingContext).
 
 -spec sctp_release(EndPoint, Assoc) -> Result
 	when

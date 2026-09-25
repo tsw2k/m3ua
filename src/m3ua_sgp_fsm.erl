@@ -480,7 +480,9 @@ down(timeout, #statedata{ep = EP, assoc = Assoc, receiver = undefined,
 	Receiver = m3ua_receiver:start(Socket, self(), Active),
 	{ok, NewCbState} = m3ua_callback:cb(asp_down, CbMod, [CbState]),
 	{next_state, down, StateData#statedata{cb_state = NewCbState,
-			receiver = Receiver}}.
+			receiver = Receiver}};
+down({'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
+	handle_dereg(Event, down, StateData).
 
 -spec down(Event :: timeout | term(),
 		From :: {pid(), Tag :: term()}, StateData :: #statedata{}) ->
@@ -512,6 +514,8 @@ down({'MTP-TRANSFER', request, _Params}, _From,
 %%
 inactive({'M-RK_REG', request, _, _, _, _, _, _, _} = Event, StateData) ->
 	handle_reg(Event, inactive, StateData);
+inactive({'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
+	handle_dereg(Event, inactive, StateData);
 inactive({'MTP-TRANSFER', request, _Ref, _From, _Params},
 		#statedata{ep = EP, assoc = Assoc, count = Count} = StateData) ->
 	?LOG_NOTICE("MTP-TRANSFER discarded",
@@ -550,6 +554,8 @@ inactive({'MTP-TRANSFER', request, _Params}, _From,
 %%
 active({'M-RK_REG', request, _, _, _, _, _, _, _} = Event, StateData) ->
 	handle_reg(Event, active, StateData);
+active({'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
+	handle_dereg(Event, active, StateData);
 active({'MTP-TRANSFER', request, Ref, From,
 		{Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
 		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, socket = Socket, assoc = Assoc,
@@ -1066,6 +1072,37 @@ handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
 	end;
 handle_reg(_, _, #statedata{ep = EP, assoc = Assoc} = StateData) ->
 	{stop, {shutdown, {{EP, Assoc}, bad_routing_context}}, StateData}.
+
+%% @hidden
+%% 	M-RK_DEREG from layer management at the sgp: take the asp out of
+%% 	an application server, however it came to be a member. There is
+%% 	no peer to ask; it is the sgp's own configuration.
+handle_dereg({'M-RK_DEREG', request, Ref, From, RC}, StateName,
+		#statedata{rks = RKs, registered = Registered,
+		ep = EP, assoc = Assoc} = StateData) ->
+	case lists:keymember(RC, 1, RKs) of
+		true ->
+			Fsm = self(),
+			case mnesia:transaction(fun() -> deregister1(Fsm, RC) end) of
+				{atomic, ok} ->
+					?LOG_NOTICE("Routing keys deregistered",
+							#{layer => m3ua, ep => EP, assoc => Assoc,
+							rcs => [RC], reason => 'M-RK_DEREG'}),
+					gen_server:cast(From, {'M-RK_DEREG', confirm, Ref, ok}),
+					NewStateData = StateData#statedata{
+							rks = lists:keydelete(RC, 1, RKs),
+							registered = lists:delete(RC, Registered)},
+					{next_state, StateName, NewStateData};
+				{aborted, Reason} ->
+					gen_server:cast(From,
+							{'M-RK_DEREG', confirm, Ref, {error, Reason}}),
+					{next_state, StateName, StateData}
+			end;
+		false ->
+			gen_server:cast(From,
+					{'M-RK_DEREG', confirm, Ref, {error, not_registered}}),
+			{next_state, StateName, StateData}
+	end.
 
 %% @hidden
 handle_sgp(M3UA, StateName, Stream, StateData) when is_binary(M3UA) ->

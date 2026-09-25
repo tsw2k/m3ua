@@ -480,8 +480,9 @@ down(timeout, #statedata{req = {'M-ASP_UP', Ref, From}} = StateData) ->
 	{next_state, down, NewStateData};
 %% An ASP DOWN ACK takes the asp down with any other request still
 %% outstanding, and that request's timer still runs.
-down(timeout, #statedata{req = {'M-RK_REG', Ref, From, _RK}} = StateData) ->
-	gen_server:cast(From, {'M-RK_REG', confirm, Ref, {error, timeout}}),
+down(timeout, #statedata{req = {RkOp, Ref, From, _}} = StateData)
+		when RkOp == 'M-RK_REG'; RkOp == 'M-RK_DEREG' ->
+	gen_server:cast(From, {RkOp, confirm, Ref, {error, timeout}}),
 	NewStateData = StateData#statedata{req = undefined},
 	{next_state, down, NewStateData};
 down(timeout, #statedata{req = {AspOp, Ref, From}} = StateData)
@@ -505,6 +506,8 @@ down(timeout, #statedata{ep = EP, assoc = Assoc, receiver = undefined,
 	{ok, NewCbState} = m3ua_callback:cb(asp_down, CbMod, [CbState]),
 	{next_state, down, StateData#statedata{cb_state = NewCbState,
 			receiver = Receiver}};
+down({'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
+	handle_dereg(Event, down, StateData);
 down({'M-ASP_UP', request, Ref, From},
 		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
@@ -568,8 +571,9 @@ down({'MTP-TRANSFER', request, _Params}, _From,
 %% 	gen_fsm:send_event/2} in the <b>inactive</b> state.
 %% @private
 %%
-inactive(timeout, #statedata{req = {'M-RK_REG', Ref, From, _RK}} = StateData) ->
-	gen_server:cast(From, {'M-RK_REG', confirm, Ref, {error, timeout}}),
+inactive(timeout, #statedata{req = {RkOp, Ref, From, _}} = StateData)
+		when RkOp == 'M-RK_REG'; RkOp == 'M-RK_DEREG' ->
+	gen_server:cast(From, {RkOp, confirm, Ref, {error, timeout}}),
 	NewStateData = StateData#statedata{req = undefined},
 	{next_state, inactive, NewStateData};
 inactive(timeout, #statedata{req = {AspOp, Ref, From}} = StateData)
@@ -580,6 +584,8 @@ inactive(timeout, #statedata{req = {AspOp, Ref, From}} = StateData)
 inactive({'M-RK_REG', request, _, _, _, _, _, _, _} = Event,
 		#statedata{req = undefined} = StateData) ->
 	handle_reg(Event, inactive, StateData);
+inactive({'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
+	handle_dereg(Event, inactive, StateData);
 inactive({'M-ASP_ACTIVE', request, Ref, From},
 		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
@@ -661,8 +667,9 @@ inactive({'MTP-TRANSFER', request, _Params}, _From,
 %% 	gen_fsm:send_event/2} in the <b>active</b> state.
 %% @private
 %%
-active(timeout, #statedata{req = {'M-RK_REG', Ref, From, _RK}} = StateData) ->
-	gen_server:cast(From, {'M-RK_REG', confirm, Ref, {error, timeout}}),
+active(timeout, #statedata{req = {RkOp, Ref, From, _}} = StateData)
+		when RkOp == 'M-RK_REG'; RkOp == 'M-RK_DEREG' ->
+	gen_server:cast(From, {RkOp, confirm, Ref, {error, timeout}}),
 	NewStateData = StateData#statedata{req = undefined},
 	{next_state, active, NewStateData};
 active(timeout, #statedata{req = {AspOp, Ref, From},
@@ -761,6 +768,8 @@ active({'M-ASP_DOWN', request, Ref, From},
 active({'M-RK_REG', request, _, _, _, _, _, _, _} = Event,
 		#statedata{req = undefined} = StateData) ->
 	handle_reg(Event, active, StateData);
+active({'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
+	handle_dereg(Event, active, StateData);
 active({AspOp, request, Ref, From},
 		#statedata{ep = EP, assoc = Assoc, req = Req} = StateData)
 		when Req /= undefined ->
@@ -1183,6 +1192,91 @@ handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
 	end.
 
 %% @hidden
+%% 	M-RK_DEREG. A static registration was made here and is undone
+%% 	here; otherwise the peer is asked with a DEREG REQ (RFC4666,
+%% 	Section-4.4.2), which needs the asp up and no other request
+%% 	outstanding.
+handle_dereg({'M-RK_DEREG', request, Ref, From, RC}, StateName,
+		#statedata{static = true, rks = RKs,
+		ep = EP, assoc = Assoc} = StateData) ->
+	case lists:keymember(RC, 1, RKs) of
+		true ->
+			Result = unreg_tables(RC),
+			?LOG_NOTICE("Routing keys deregistered",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					rcs => [RC], reason => 'M-RK_DEREG'}),
+			gen_server:cast(From, {'M-RK_DEREG', confirm, Ref, Result}),
+			NewStateData = StateData#statedata{rks = lists:keydelete(RC, 1, RKs)},
+			{next_state, StateName, NewStateData};
+		false ->
+			gen_server:cast(From,
+					{'M-RK_DEREG', confirm, Ref, {error, not_registered}}),
+			{next_state, StateName, StateData}
+	end;
+handle_dereg({'M-RK_DEREG', request, Ref, From, _RC}, down,
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	?LOG_NOTICE("ASP state request refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			op => 'M-RK_DEREG', reason => asp_down}),
+	gen_server:cast(From, {'M-RK_DEREG', confirm, Ref, {error, asp_down}}),
+	{next_state, down, StateData};
+handle_dereg({'M-RK_DEREG', request, Ref, From, _RC}, StateName,
+		#statedata{req = Req, ep = EP, assoc = Assoc} = StateData)
+		when Req /= undefined ->
+	?LOG_NOTICE("ASP state request refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			op => 'M-RK_DEREG', reason => asp_busy}),
+	gen_server:cast(From, {'M-RK_DEREG', confirm, Ref, {error, asp_busy}}),
+	{next_state, StateName, StateData};
+handle_dereg({'M-RK_DEREG', request, Ref, From, RC}, StateName,
+		#statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort,
+		ppid = Ppid, ep = EP, assoc = Assoc, count = Count} = StateData) ->
+	Params = m3ua_codec:parameters([{?RoutingContext, [RC]}]),
+	DeregReq = #m3ua{class = ?RKMMessage, type = ?RKMDEREGREQ, params = Params},
+	Message = m3ua_codec:m3ua(DeregReq),
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Message) of
+		ok ->
+			Req = {'M-RK_DEREG', Ref, From, RC},
+			DeregOut = maps:get(dereg_out, Count, 0),
+			NewCount = maps:put(dereg_out, DeregOut + 1, Count),
+			NewStateData = start_tack(StateData#statedata{req = Req,
+					count = NewCount}),
+			{next_state, StateName, NewStateData};
+		{error, eagain} ->
+			% @todo flow control
+			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
+		{error, Reason} ->
+			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
+	end.
+
+%% @hidden
+%% 	Take this asp out of the application server of a routing context
+%% 	it has deregistered.
+unreg_tables(RC) ->
+	Fsm = self(),
+	F = fun() ->
+			case mnesia:read(m3ua_as, RC, write) of
+				[#m3ua_as{asp = ASPs} = AS] ->
+					NewASPs = lists:keydelete(Fsm, #m3ua_as_asp.fsm, ASPs),
+					ok = mnesia:write(AS#m3ua_as{asp = NewASPs});
+				[] ->
+					ok
+			end,
+			case mnesia:read(m3ua_asp, Fsm, write) of
+				[#m3ua_asp{rc = RC}] ->
+					mnesia:delete(m3ua_asp, Fsm, write);
+				_ ->
+					ok
+			end
+	end,
+	case mnesia:transaction(F) of
+		{atomic, ok} ->
+			ok;
+		{aborted, Reason} ->
+			{error, Reason}
+	end.
+
+%% @hidden
 handle_asp(M3UA, StateName, Stream, StateData) when is_binary(M3UA) ->
 	case m3ua_codec:check(M3UA) of
 		{ok, Message} ->
@@ -1361,6 +1455,57 @@ handle_asp(#m3ua{class = ?RKMMessage, type = ?RKMREGRSP, params = Params},
 			NewStateData = StateData#statedata{count = NewCount},
 			{next_state, StateName, NewStateData}
 	end;
+handle_asp(#m3ua{class = ?RKMMessage, type = ?RKMDEREGRSP, params = Params},
+		StateName, _Stream, #statedata{req = {'M-RK_DEREG', Ref, From, RC},
+		rks = RKs, receiver = Receiver, active = Active,
+		ep = EP, assoc = Assoc, count = Count} = StateData) ->
+	Parameters = m3ua_codec:parameters(Params),
+	%% A DEREG RSP answers each routing context its DEREG REQ named;
+	%% ours is the result naming the context we sent.
+	Results = m3ua_codec:get_all_parameter(?DeregistrationResult, Parameters),
+	ok = m3ua_receiver:replenish(Receiver, Active),
+	DeregRspIn = maps:get(dereg_rsp_in, Count, 0),
+	NewCount = maps:put(dereg_rsp_in, DeregRspIn + 1, Count),
+	case lists:keyfind(RC, #deregistration_result.rc, Results) of
+		#deregistration_result{status = deregistered} ->
+			Result = unreg_tables(RC),
+			?LOG_NOTICE("Routing keys deregistered",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					rcs => [RC], reason => dereg_rsp}),
+			gen_server:cast(From, {'M-RK_DEREG', confirm, Ref, Result}),
+			NewStateData = StateData#statedata{req = undefined,
+					rks = lists:keydelete(RC, 1, RKs), count = NewCount},
+			{next_state, StateName, NewStateData};
+		#deregistration_result{status = Status} ->
+			?LOG_NOTICE("Routing key deregistration refused by peer",
+					#{layer => m3ua, ep => EP, assoc => Assoc, rc => RC,
+					reason => Status}),
+			gen_server:cast(From, {'M-RK_DEREG', confirm, Ref, {error, Status}}),
+			NewStateData = StateData#statedata{req = undefined,
+					count = NewCount},
+			{next_state, StateName, NewStateData};
+		false ->
+			%% Not an answer to ours; it may yet come.
+			?LOG_NOTICE("Deregistration response discarded",
+					#{layer => m3ua, ep => EP, assoc => Assoc, rc => RC,
+					results => Results, reason => unknown_rc}),
+			Unexpected = maps:get(unexpected_in, NewCount, 0),
+			NextCount = maps:put(unexpected_in, Unexpected + 1, NewCount),
+			{next_state, StateName, StateData#statedata{count = NextCount}}
+	end;
+handle_asp(#m3ua{class = ?MGMTMessage, type = ?MGMTError, params = Params},
+		StateName, _Stream, #statedata{req = {'M-RK_DEREG', Ref, From, RC},
+		receiver = Receiver, active = Active,
+		ep = EP, assoc = Assoc} = StateData) ->
+	Parameters = m3ua_codec:parameters(Params),
+	{ok, Reason} = m3ua_codec:find_parameter(?ErrorCode, Parameters),
+	?LOG_NOTICE("Routing key deregistration refused by peer",
+			#{layer => m3ua, ep => EP, assoc => Assoc, rc => RC,
+			reason => Reason}),
+	gen_server:cast(From, {'M-RK_DEREG', confirm, Ref, {error, Reason}}),
+	ok = m3ua_receiver:replenish(Receiver, Active),
+	NewStateData = StateData#statedata{req = undefined},
+	{next_state, StateName, NewStateData};
 handle_asp(#m3ua{class = ?MGMTMessage, type = ?MGMTError, params = Params},
 		StateName, _Stream, #statedata{req = {'M-RK_REG', Ref, From, _RK},
 		socket = _Socket, receiver = Receiver, active = Active,

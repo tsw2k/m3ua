@@ -101,6 +101,7 @@ all() ->
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
+			sgp_deregister_local, asp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
 			asp_inactive_to_down, asp_active_to_down,
@@ -516,6 +517,87 @@ sgp_dereg_req(_Config) ->
 	{ok, #{dereg_in := 3, dereg_rsp_out := 3}} = m3ua:getcount(EP, Assoc),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+sgp_deregister_local() ->
+	[{userdata, [{doc, "M-RK_DEREG at a signalling gateway takes its asp out of the application server, with nothing sent."}]}].
+
+sgp_deregister_local(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_asp(),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	RC = raw_register(Peer, PeerAssoc),
+	[_] = as_asps(RC),
+	ok = m3ua:deregister(EP, Assoc, RC),
+	[] = as_asps(RC),
+	{error, not_registered} = m3ua:deregister(EP, Assoc, RC),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+asp_deregister() ->
+	[{userdata, [{doc, "M-RK_DEREG at an asp sends a DEREG REQ and answers with the DEREG RSP's result for its routing context."}]}].
+
+asp_deregister(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(),
+	Self = self(),
+	%% Up and registered, the gateway's side played by hand.
+	_ = spawn(fun() -> Self ! {asp_up, m3ua:asp_up(EP, Assoc)} end),
+	#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP} = raw_get(Peer),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUPACK)),
+	ok = receive {asp_up, UpResult} -> UpResult after 4000 -> timeout end,
+	Keys = [{rand:uniform(16383), [], []}],
+	_ = spawn(fun() ->
+			Self ! {register, m3ua:register(EP, Assoc,
+					undefined, 0, Keys, loadshare)}
+	end),
+	#m3ua{class = ?RKMMessage, type = ?RKMREGREQ,
+			params = ReqParams} = raw_get(Peer),
+	RoutingKey = m3ua_codec:fetch_parameter(?RoutingKey,
+			m3ua_codec:parameters(ReqParams)),
+	#m3ua_routing_key{lrk_id = LrkId} = m3ua_codec:routing_key(RoutingKey),
+	RC = unused_rc(),
+	RegRsp = #m3ua{class = ?RKMMessage, type = ?RKMREGRSP,
+			params = [{?RegistrationResult, #registration_result{
+			lrk_id = LrkId, status = registered, rc = RC}}]},
+	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(RegRsp)),
+	{ok, RC} = receive {register, RegResult} -> RegResult after 4000 -> timeout end,
+	[_] = as_asps(RC),
+	Dereg = fun() ->
+			_ = spawn(fun() ->
+					Self ! {deregister, m3ua:deregister(EP, Assoc, RC)}
+			end),
+			#m3ua{class = ?RKMMessage, type = ?RKMDEREGREQ,
+					params = DeregParams} = raw_get(Peer),
+			[RC] = m3ua_codec:fetch_parameter(?RoutingContext,
+					m3ua_codec:parameters(DeregParams)),
+			ok
+	end,
+	%% Refused by the peer: the status is the reason, and the asp is
+	%% still in the application server.
+	ok = Dereg(),
+	ok = raw_put(Peer, PeerAssoc, raw_dereg_rsp(RC, asp_currently_active)),
+	{error, asp_currently_active} = receive
+		{deregister, Result1} ->
+			Result1
+	after
+		4000 ->
+			timeout
+	end,
+	[_] = as_asps(RC),
+	%% Deregistered: it is not.
+	ok = Dereg(),
+	ok = raw_put(Peer, PeerAssoc, raw_dereg_rsp(RC, deregistered)),
+	ok = receive {deregister, Result2} -> Result2 after 4000 -> timeout end,
+	[] = as_asps(RC),
+	{ok, #{dereg_out := 2, dereg_rsp_in := 2}} = m3ua:getcount(EP, Assoc),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+%% @hidden
+raw_dereg_rsp(RC, Status) ->
+	DeregRsp = #m3ua{class = ?RKMMessage, type = ?RKMDEREGRSP,
+			params = [{?DeregistrationResult,
+			#deregistration_result{rc = RC, status = Status}}]},
+	m3ua_codec:m3ua(DeregRsp).
 
 %% @hidden
 %% 	Send a DEREG REQ and answer the results of the DEREG RSP.

@@ -26,7 +26,7 @@
 %% export the m3ua_lm_server API
 -export([start/2, stop/1]).
 -export([sctp_release/2, sctp_status/2]).
--export([register/7]).
+-export([register/7, deregister/3]).
 -export([as_add/7, as_delete/1]).
 -export([asp_status/2, asp_up/2, asp_down/2, asp_active/2,
 			asp_inactive/2]).
@@ -131,6 +131,18 @@ as_delete(RC) ->
 register(EndPoint, Assoc, RoutingContext, NA, Keys, Mode, AsName) ->
 	gen_server:call(m3ua, {'M-RK_REG', request,
 			EndPoint, Assoc, RoutingContext, NA, Keys, Mode, AsName}).
+
+-spec deregister(EndPoint, Assoc, RoutingContext) -> Result
+	when
+		EndPoint :: pid(),
+		Assoc :: gen_sctp:assoc_id(),
+		RoutingContext :: 0..4294967295,
+		Result :: ok | {error, Reason},
+		Reason :: term().
+%% @doc Deregister the routing key of an application server.
+deregister(EndPoint, Assoc, RoutingContext) ->
+	gen_server:call(m3ua, {'M-RK_DEREG', request,
+			EndPoint, Assoc, RoutingContext}).
 
 -spec sctp_release(EndPoint, Assoc) -> Result
 	when
@@ -394,6 +406,18 @@ handle_call({'M-RK_REG', request, EndPoint, Assoc,
 		none ->
 			{reply, {error, not_found}, State}
 	end;
+handle_call({'M-RK_DEREG', request, EndPoint, Assoc, RC}, From,
+		#state{fsms = Fsms, reqs = Reqs} = State) ->
+	case gb_trees:lookup({EndPoint, Assoc}, Fsms) of
+		{value, Fsm} ->
+			Ref = make_ref(),
+			gen_fsm:send_event(Fsm, {'M-RK_DEREG', request, Ref, self(), RC}),
+			NewReqs = gb_trees:insert(Ref, From, Reqs),
+			NewState = State#state{reqs = NewReqs},
+			{noreply, NewState};
+		none ->
+			{reply, {error, not_found}, State}
+	end;
 handle_call({AspOp, request, EndPoint, Assoc}, From,
 		#state{fsms = Fsms, reqs = Reqs} = State)
 		when AspOp == 'M-ASP_UP'; AspOp == 'M-ASP_DOWN';
@@ -534,8 +558,9 @@ handle_cast({AspOp, confirm, Ref, {error, Reason}},
 					reason => no_request_outstanding}),
 			{noreply, State}
 	end;
-handle_cast({'M-RK_REG', confirm, Ref, Result},
-		#state{reqs = Reqs} = State) ->
+handle_cast({RkOp, confirm, Ref, Result},
+		#state{reqs = Reqs} = State)
+		when RkOp == 'M-RK_REG'; RkOp == 'M-RK_DEREG' ->
 	case gb_trees:lookup(Ref, Reqs) of
 		{value, From} ->
 			gen_server:reply(From, Result),
@@ -544,7 +569,7 @@ handle_cast({'M-RK_REG', confirm, Ref, Result},
 			{noreply, NewState};
 		none ->
 			?LOG_NOTICE("Confirmation discarded",
-					#{layer => m3ua, ref => Ref, op => 'M-RK_REG',
+					#{layer => m3ua, ref => Ref, op => RkOp,
 					reason => no_request_outstanding}),
 			{noreply, State}
 	end;
