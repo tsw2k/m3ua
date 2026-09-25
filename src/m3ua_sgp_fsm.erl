@@ -1421,7 +1421,7 @@ reg_request([H | T], StateName, #statedata{socket = Socket, peer_addr = PeerAddr
 			case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 				ok ->
 					ErrorOut = maps:get(error_out, Count, 0),
-					NewCount = maps:put(eror_out, ErrorOut + 1, Count),
+					NewCount = maps:put(error_out, ErrorOut + 1, Count),
 					NewStateData = StateData#statedata{count = NewCount},
 					ok = m3ua_receiver:replenish(Receiver, Active),
 					{next_state, StateName, NewStateData};
