@@ -327,11 +327,6 @@
 		Result :: {ok, NewState} | {error, Reason},
 		NewState :: term(),
 		Reason :: term().
-%% Called when a destination audit (DAUD) is received.  An ASP is
-%% asking whether the affected point codes are available.  Only the
-%% signalling gateway knows, so the answer is not sent from here: the
-%% callback is expected to reply with m3ua:duna/3, m3ua:dava/3 or
-%% m3ua:drst/3 as the case may be (RFC 4666 4.4.1.5).
 -callback audit(Stream, RCs, APCs, State) -> Result
 	when
 		Stream :: pos_integer(),
@@ -341,7 +336,6 @@
 		APC :: 0..16777215,
 		State :: term(),
 		Result :: {ok, State}.
-
 -callback register(RC, NA, Keys, TMT, State) -> Result
 	when
 		RC :: 0..4294967295,
@@ -386,7 +380,6 @@
 		NewState :: term(),
 		Reason :: term().
 -optional_callbacks([audit/4]).
-
 -callback terminate(Reason, State) -> Result
 	when
 		Reason :: term(),
@@ -879,13 +872,6 @@ code_change(_OldVsn, StateName, StateData, _Extra) ->
 		CbMod :: atom() | #m3ua_fsm_cb{},
 		CbArgs :: [term()],
 		CbState :: term().
-%% @doc Ask the callback about a destination audit, where it wants to
-%% 	be asked.
-%%
-%% 	Optional, and checked rather than assumed: a callback module
-%% 	written before there was an audit callback must go on working, and
-%% 	an audit it does not answer leaves the ASP no worse off than the
-%% 	silence it got before.
 %% @hidden
 audit(CbMod, CbArgs, CbState) when is_atom(CbMod) ->
 	case erlang:function_exported(CbMod, audit, 4) of
@@ -919,7 +905,6 @@ ssnm_count(?SSNMDAUD) -> daud_out;
 ssnm_count(?SSNMSCON) -> scon_out;
 ssnm_count(?SSNMDUPU) -> dupu_out;
 ssnm_count(?SSNMDRST) -> drst_out.
-
 
 %% @hidden
 handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},

@@ -134,11 +134,6 @@ status(_Stream, _RK, _DPCs, State) ->
 		APC :: 0..16777215,
 		State :: term(),
 		Result :: {ok, State}.
-%% @doc A destination audit (DAUD) was received.
-%%
-%% 	The default takes no action. Only a signalling gateway knows
-%% 	whether the affected point codes are available, and it answers
-%% 	with m3ua:duna/3, m3ua:dava/3 or m3ua:drst/3 of its own accord.
 audit(_Stream, _RCs, _APCs, State) ->
 	{ok, State}.
 

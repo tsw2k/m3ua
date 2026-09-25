@@ -447,15 +447,7 @@ cast(Fsm, Stream, RC, OPC, DPC, NI, SI, SLS, Data)
 		RC :: 0..4294967295,
 		APCs :: [APC],
 		APC :: 0..16777215.
-%% @doc Tell an ASP that SS7 destinations have become unavailable.
-%%
-%% 	The Destination Unavailable (DUNA) message of RFC 4666 3.4.1,
-%% 	which a signalling gateway sends when it can no longer reach the
-%% 	affected point codes. It arrives at the ASP as the MTP-PAUSE
-%% 	indication of its `pause' callback.
-%%
-%% 	`Fsm' is the SGP process of the association to tell, as given to
-%% 	the callback module's init/6.
+%% @doc Send Destination Unavailable (DUNA) to an ASP.
 duna(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
 	ssnm(Fsm, ?SSNMDUNA, RCs, APCs, []).
 
@@ -466,11 +458,7 @@ duna(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
 		RC :: 0..4294967295,
 		APCs :: [APC],
 		APC :: 0..16777215.
-%% @doc Tell an ASP that SS7 destinations are available again.
-%%
-%% 	The Destination Available (DAVA) message of RFC 4666 3.4.2. It
-%% 	arrives at the ASP as the MTP-RESUME indication of its `resume'
-%% 	callback.
+%% @doc Send Destination Available (DAVA) to an ASP.
 dava(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
 	ssnm(Fsm, ?SSNMDAVA, RCs, APCs, []).
 
@@ -481,11 +469,7 @@ dava(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
 		RC :: 0..4294967295,
 		APCs :: [APC],
 		APC :: 0..16777215.
-%% @doc Tell an ASP that SS7 destinations are restricted.
-%%
-%% 	The Destination Restricted (DRST) message of RFC 4666 3.4.6,
-%% 	which says the gateway can still reach the affected point codes
-%% 	but would rather the traffic went another way.
+%% @doc Send Destination Restricted (DRST) to an ASP.
 drst(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
 	ssnm(Fsm, ?SSNMDRST, RCs, APCs, []).
 
@@ -496,9 +480,7 @@ drst(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
 		RC :: 0..4294967295,
 		APCs :: [APC],
 		APC :: 0..16777215.
-%% @doc Tell an ASP that the route to SS7 destinations is congested.
-%%
-%% 	The Signalling Congestion (SCON) message of RFC 4666 3.4.4.
+%% @doc Send Signalling Congestion (SCON) to an ASP.
 scon(Fsm, RCs, APCs) ->
 	scon(Fsm, RCs, APCs, undefined, undefined).
 
@@ -511,7 +493,7 @@ scon(Fsm, RCs, APCs) ->
 		APC :: 0..16777215,
 		ConcernedDPC :: undefined | 0..16777215,
 		CongestionLevel :: undefined | 0..3.
-%% @doc The same, with the two optional parameters of RFC 4666 3.4.4.
+%% @doc Send Signalling Congestion (SCON) with optional parameters.
 scon(Fsm, RCs, APCs, ConcernedDPC, CongestionLevel)
 		when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
 	Optional = case ConcernedDPC of
@@ -537,12 +519,7 @@ scon(Fsm, RCs, APCs, ConcernedDPC, CongestionLevel)
 		APC :: 0..16777215,
 		User :: m3ua_codec:mtp3_user(),
 		Cause :: m3ua_codec:mtp3_cause().
-%% @doc Tell an ASP that an MTP3 User Part is unavailable at an SS7
-%% 	destination.
-%%
-%% 	The Destination User Part Unavailable (DUPU) message of RFC 4666
-%% 	3.4.5, which carries the User Part Unavailable of the SS7 network
-%% 	(ITU-T Q.704 15.17) across to the ASP.
+%% @doc Send Destination User Part Unavailable (DUPU) to an ASP.
 dupu(Fsm, RCs, APCs, User, Cause)
 		when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
 	ssnm(Fsm, ?SSNMDUPU, RCs, APCs, [{?UserCause, {User, Cause}}]).
@@ -554,14 +531,7 @@ dupu(Fsm, RCs, APCs, User, Cause)
 		RC :: 0..4294967295,
 		APCs :: [APC],
 		APC :: 0..16777215.
-%% @doc Ask a signalling gateway whether SS7 destinations are available.
-%%
-%% 	The Destination State Audit (DAUD) message of RFC 4666 3.4.3, sent
-%% 	by an ASP. The gateway answers with a DUNA, DAVA or DRST for each
-%% 	affected point code (4.4.1.5); it is under no obligation to answer
-%% 	at all, so an ASP that audits should not wait on it.
-%%
-%% 	`Fsm' is the ASP process of the association to ask.
+%% @doc Send Destination State Audit (DAUD) to an SGP.
 daud(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
 	ssnm(Fsm, ?SSNMDAUD, RCs, APCs, []).
 
@@ -572,12 +542,7 @@ daud(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
 		RCs :: [0..4294967295],
 		APCs :: [0..16777215],
 		Optional :: [{integer(), term()}].
-%% @doc Send one SS7 signalling network management message.
-%%
-%% 	Every one of them names the point codes it is about, and carries
-%% 	the routing contexts where the ASP is registered for more than
-%% 	one (RFC 4666 3.4).
-%% @private
+%% @hidden
 ssnm(Fsm, Type, RCs, APCs, Optional) ->
 	Params = case RCs of
 		[] ->

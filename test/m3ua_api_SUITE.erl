@@ -926,6 +926,100 @@ as_state_down(_Config) ->
 	ok = m3ua:stop(ServerEP),
 	ok = slave:stop(AsNode).
 
+ssnm_pause_resume() ->
+	[{userdata, [{doc, "Send DUNA and DAVA to an ASP."}]}].
+
+ssnm_pause_resume(_Config) ->
+	Port = rand:uniform(64511) + 1024,
+	RefS = make_ref(),
+	{ok, ServerEP} = m3ua:start(sgp_cb(RefS), Port, []),
+	{ok, AsNode} = slave_as(),
+	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
+	ok = rpc:call(AsNode, application, start, [snmp]),
+	ok = rpc:call(AsNode, application, start, [inets]),
+	ok = rpc:call(AsNode, application, start, [m3ua]),
+	RefC = make_ref(),
+	{ok, ClientEP} = rpc:call(AsNode, m3ua, start,
+			[remote_ssnm_cb(RefC), 0,
+			[{role, asp}, {connect, {127,0,0,1}, Port, []}]]),
+	Sgp = wait(RefS),
+	_Asp = wait(RefC),
+	[Assoc] = m3ua:get_assoc(ClientEP),
+	ok = rpc:call(AsNode, m3ua, asp_up, [ClientEP, Assoc]),
+	DPC = rand:uniform(16383),
+	Keys = [{DPC, [], []}],
+	{ok, RC} = rpc:call(AsNode, m3ua, register,
+			[ClientEP, Assoc, undefined, undefined, Keys, loadshare]),
+	ok = rpc:call(AsNode, m3ua, asp_active, [ClientEP, Assoc]),
+	APC = rand:uniform(16383),
+	ok = m3ua:duna(Sgp, [RC], [APC]),
+	receive
+		{RefC, pause, _, [[APC]]} ->
+			ok
+	after
+		4000 ->
+			ct:fail(no_pause_indication)
+	end,
+	ok = m3ua:dava(Sgp, [RC], [APC]),
+	receive
+		{RefC, resume, _, [[APC]]} ->
+			ok
+	after
+		4000 ->
+			ct:fail(no_resume_indication)
+	end,
+	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
+	ok = m3ua:stop(ServerEP),
+	ok = slave:stop(AsNode).
+
+ssnm_audit() ->
+	[{userdata, [{doc, "Answer a DAUD from an ASP."}]}].
+
+ssnm_audit(_Config) ->
+	Port = rand:uniform(64511) + 1024,
+	RefS = make_ref(),
+	CbS = sgp_cb(RefS),
+	{ok, ServerEP} = m3ua:start(CbS#m3ua_fsm_cb{
+			audit = fun ?MODULE:cb_audit/6}, Port, []),
+	{ok, AsNode} = slave_as(),
+	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
+	ok = rpc:call(AsNode, application, start, [snmp]),
+	ok = rpc:call(AsNode, application, start, [inets]),
+	ok = rpc:call(AsNode, application, start, [m3ua]),
+	RefC = make_ref(),
+	{ok, ClientEP} = rpc:call(AsNode, m3ua, start,
+			[remote_ssnm_cb(RefC), 0,
+			[{role, asp}, {connect, {127,0,0,1}, Port, []}]]),
+	Sgp = wait(RefS),
+	Asp = wait(RefC),
+	[Assoc] = m3ua:get_assoc(ClientEP),
+	ok = rpc:call(AsNode, m3ua, asp_up, [ClientEP, Assoc]),
+	DPC = rand:uniform(16383),
+	Keys = [{DPC, [], []}],
+	{ok, RC} = rpc:call(AsNode, m3ua, register,
+			[ClientEP, Assoc, undefined, undefined, Keys, loadshare]),
+	ok = rpc:call(AsNode, m3ua, asp_active, [ClientEP, Assoc]),
+	APC = rand:uniform(16383),
+	ok = rpc:call(AsNode, m3ua, daud, [Asp, [RC], [APC]]),
+	receive
+		{RefS, audit, _, [[APC]]} ->
+			ok
+	after
+		4000 ->
+			ct:fail(no_audit_indication)
+	end,
+	ok = m3ua:dava(Sgp, [RC], [APC]),
+	receive
+		{RefC, resume, _, [[APC]]} ->
+			ok
+	after
+		4000 ->
+			ct:fail(no_resume_indication)
+	end,
+	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
+	ok = m3ua:stop(ServerEP),
+	ok = slave:stop(AsNode).
+
 %%---------------------------------------------------------------------
 %%  Internal functions
 %%---------------------------------------------------------------------
@@ -956,15 +1050,9 @@ remote_cb(Ref) ->
 	Fnotify = fun ?MODULE:cb_notify/6,
 	#m3ua_fsm_cb{init = Finit, notify = Fnotify, extra = [Ref, self()]}.
 
-%% @hidden
-%% A gateway callback that reports the SGP process it runs in.  The
-%% SSNM API is called with that process, so a case that sends one has
-%% to be told it, and callback/1 above reports only that it started.
 sgp_cb(Ref) ->
 	#m3ua_fsm_cb{init = fun ?MODULE:cb_init/8, extra = [Ref, self()]}.
 
-%% @hidden
-%% An ASP callback that reports the SSNM indications it is given.
 remote_ssnm_cb(Ref) ->
 	Cb = remote_cb(Ref),
 	Cb#m3ua_fsm_cb{pause = fun ?MODULE:cb_pause/6,
@@ -1034,104 +1122,3 @@ slave_as() ->
 	Node = "as" ++ integer_to_list(erlang:unique_integer([positive])),
 	slave:start_link(Host, Node, ErlFlags).
 
-ssnm_pause_resume() ->
-	[{userdata, [{doc, "A signalling gateway tells an ASP that SS7 "
-			"destinations have become unavailable and available again "
-			"(RFC 4666 3.4.1, 3.4.2). They arrive as the MTP-PAUSE and "
-			"MTP-RESUME indications of the ASP's callbacks"}]}].
-
-ssnm_pause_resume(_Config) ->
-	Port = rand:uniform(64511) + 1024,
-	RefS = make_ref(),
-	{ok, ServerEP} = m3ua:start(sgp_cb(RefS), Port, []),
-	{ok, AsNode} = slave_as(),
-	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
-	ok = rpc:call(AsNode, application, start, [snmp]),
-	ok = rpc:call(AsNode, application, start, [inets]),
-	ok = rpc:call(AsNode, application, start, [m3ua]),
-	RefC = make_ref(),
-	{ok, ClientEP} = rpc:call(AsNode, m3ua, start,
-			[remote_ssnm_cb(RefC), 0,
-			[{role, asp}, {connect, {127,0,0,1}, Port, []}]]),
-	Sgp = wait(RefS),
-	_Asp = wait(RefC),
-	[Assoc] = m3ua:get_assoc(ClientEP),
-	ok = rpc:call(AsNode, m3ua, asp_up, [ClientEP, Assoc]),
-	DPC = rand:uniform(16383),
-	Keys = [{DPC, [], []}],
-	{ok, RC} = rpc:call(AsNode, m3ua, register,
-			[ClientEP, Assoc, undefined, undefined, Keys, loadshare]),
-	ok = rpc:call(AsNode, m3ua, asp_active, [ClientEP, Assoc]),
-	APC = rand:uniform(16383),
-	ok = m3ua:duna(Sgp, [RC], [APC]),
-	receive
-		{RefC, pause, _, [[APC]]} ->
-			ok
-	after
-		4000 ->
-			ct:fail(no_pause_indication)
-	end,
-	ok = m3ua:dava(Sgp, [RC], [APC]),
-	receive
-		{RefC, resume, _, [[APC]]} ->
-			ok
-	after
-		4000 ->
-			ct:fail(no_resume_indication)
-	end,
-	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
-	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
-
-ssnm_audit() ->
-	[{userdata, [{doc, "An ASP audits the state of SS7 destinations "
-			"(RFC 4666 3.4.3). The gateway is asked through its audit "
-			"callback, since only it knows, and answers with a DAVA "
-			"(4.4.1.5). Before this the audit had no clause at all and "
-			"took the association down with it"}]}].
-
-ssnm_audit(_Config) ->
-	Port = rand:uniform(64511) + 1024,
-	RefS = make_ref(),
-	CbS = sgp_cb(RefS),
-	{ok, ServerEP} = m3ua:start(CbS#m3ua_fsm_cb{
-			audit = fun ?MODULE:cb_audit/6}, Port, []),
-	{ok, AsNode} = slave_as(),
-	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
-	ok = rpc:call(AsNode, application, start, [snmp]),
-	ok = rpc:call(AsNode, application, start, [inets]),
-	ok = rpc:call(AsNode, application, start, [m3ua]),
-	RefC = make_ref(),
-	{ok, ClientEP} = rpc:call(AsNode, m3ua, start,
-			[remote_ssnm_cb(RefC), 0,
-			[{role, asp}, {connect, {127,0,0,1}, Port, []}]]),
-	Sgp = wait(RefS),
-	Asp = wait(RefC),
-	[Assoc] = m3ua:get_assoc(ClientEP),
-	ok = rpc:call(AsNode, m3ua, asp_up, [ClientEP, Assoc]),
-	DPC = rand:uniform(16383),
-	Keys = [{DPC, [], []}],
-	{ok, RC} = rpc:call(AsNode, m3ua, register,
-			[ClientEP, Assoc, undefined, undefined, Keys, loadshare]),
-	ok = rpc:call(AsNode, m3ua, asp_active, [ClientEP, Assoc]),
-	APC = rand:uniform(16383),
-	ok = rpc:call(AsNode, m3ua, daud, [Asp, [RC], [APC]]),
-	receive
-		{RefS, audit, _, [[APC]]} ->
-			ok
-	after
-		4000 ->
-			ct:fail(no_audit_indication)
-	end,
-	%% The gateway answers, which is the whole point of being asked.
-	ok = m3ua:dava(Sgp, [RC], [APC]),
-	receive
-		{RefC, resume, _, [[APC]]} ->
-			ok
-	after
-		4000 ->
-			ct:fail(no_resume_indication)
-	end,
-	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
-	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
