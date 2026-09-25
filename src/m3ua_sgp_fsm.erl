@@ -253,6 +253,7 @@
 		rks = [] :: [{RC :: 0..4294967295,
 				RK :: m3ua:routing_key(),
 				AsState :: down | inactive | active | pending}],
+		registered = [] :: [RC :: 0..4294967295],
 		ual :: undefined | integer(),
 		stream :: undefined | pos_integer(),
 		ep :: pid(),
@@ -1138,8 +1139,8 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP},
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
 %% RFC4666, Section-4.3.4.1: an ASP UP at an active asp is acknowledged,
-%% reported as unexpected, and takes the asp out of service in every
-%% application server it is in.
+%% reported as unexpected, takes the asp out of service in every
+%% application server it is in, and deregisters its routing keys.
 handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP},
 		active, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid,
 		assoc = Assoc, ep = EP, callback = CbMod, cb_state = CbState,
@@ -1151,7 +1152,8 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP},
 	Packet = m3ua_codec:m3ua(AspUpAck),
 	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
-			NewStateData = state_traffic_maint(undefined, asp_inactive, StateData),
+			NewStateData = deregister(asp_up,
+					state_traffic_maint(undefined, asp_inactive, StateData)),
 			CbArgs = [CbState],
 			{ok, NewCbState} = m3ua_callback:cb(asp_inactive, CbMod, CbArgs),
 			UpIn = maps:get(up_in, Count, 0),
@@ -1213,7 +1215,8 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN, params = Params},
 	Packet = m3ua_codec:m3ua(AspDownAck),
 	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
-			NewStateData = state_traffic_maint(RCs, asp_down, StateData),
+			NewStateData = deregister(asp_down,
+					state_traffic_maint(RCs, asp_down, StateData)),
 			CbArgs = [CbState],
 			{ok, NewCbState} = m3ua_callback:cb(asp_down, CbMod, CbArgs),
 			ok = m3ua_receiver:replenish(Receiver, Active),
@@ -1413,7 +1416,7 @@ reg_request(RoutingKeys, StateName, StateData) ->
 %% @hidden
 reg_request([H | T], StateName, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid,
 		receiver = Receiver, active = Active, ep = EP, assoc = Assoc, rks = RKs,
-		callback = CbMod, cb_state = CbState,
+		registered = Registered, callback = CbMod, cb_state = CbState,
 		count = Count} = StateData, RegResults, Notifies) ->
 	try m3ua_codec:routing_key(H)
 	of
@@ -1428,6 +1431,7 @@ reg_request([H | T], StateName, #statedata{socket = Socket, peer_addr = PeerAddr
 					CbArgs = [NewRC, NA, SortedKeys, Mode, CbState],
 					{ok, NewCbState} = m3ua_callback:cb(register, CbMod, CbArgs),
 					NewStateData = StateData#statedata{rks = NewRKs,
+							registered = [NewRC | lists:delete(NewRC, Registered)],
 							cb_state = NewCbState},
 					RegResult = {?RegistrationResult, RR},
 					reg_request(T, StateName, NewStateData, [RegResult | RegResults], Notifies);
@@ -1436,6 +1440,7 @@ reg_request([H | T], StateName, #statedata{socket = Socket, peer_addr = PeerAddr
 					CbArgs = [NewRC, NA, SortedKeys, Mode, CbState],
 					{ok, NewCbState} = m3ua_callback:cb(register, CbMod, CbArgs),
 					NewStateData = StateData#statedata{rks = NewRKs,
+							registered = [NewRC | lists:delete(NewRC, Registered)],
 							cb_state = NewCbState},
 					RegResult = {?RegistrationResult, RR},
 					reg_request(T, StateName, NewStateData, [RegResult | RegResults], [Notify | Notifies]);
@@ -1699,6 +1704,58 @@ reg_tables(RC, RK, Name, AspState) ->
 			{ok, AsState};
 		{aborted, Reason} ->
 			{error, Reason}
+	end.
+
+%% @hidden
+%% 	RFC4666, Sections 4.3.4.1 and 4.3.4.2: an ASP DOWN, or an ASP UP at
+%% 	an active asp, deregisters every routing key the asp registered.
+%% 	The application servers it was put in by configuration it stays
+%% 	in; only those it joined with a REG REQ does it leave. Called once
+%% 	the asp's state in each of them has been brought up to date.
+deregister(_Reason, #statedata{registered = []} = StateData) ->
+	StateData;
+deregister(Reason, #statedata{registered = RCs, rks = RKs,
+		ep = EP, assoc = Assoc} = StateData) ->
+	Fsm = self(),
+	F = fun() ->
+			lists:foreach(fun(RC) -> deregister1(Fsm, RC) end, RCs)
+	end,
+	case mnesia:transaction(F) of
+		{atomic, ok} ->
+			?LOG_NOTICE("Routing keys deregistered",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					rcs => RCs, reason => Reason}),
+			NewRKs = [RK || {RC, _, _} = RK <- RKs,
+					not lists:member(RC, RCs)],
+			StateData#statedata{rks = NewRKs, registered = []};
+		{aborted, Reason1} ->
+			?LOG_ERROR("Routing keys not deregistered",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					rcs => RCs, reason => Reason1}),
+			StateData
+	end.
+%% @hidden
+deregister1(Fsm, RC) ->
+	case mnesia:read(m3ua_as, RC, write) of
+		[#m3ua_as{asp = ASPs} = AS] ->
+			NewASPs = lists:keydelete(Fsm, #m3ua_as_asp.fsm, ASPs),
+			%% An application server with no asp left up is down.
+			NewAS = case [A || #m3ua_as_asp{state = S} = A <- NewASPs,
+					S /= down] of
+				[] ->
+					AS#m3ua_as{asp = NewASPs, state = down};
+				_ ->
+					AS#m3ua_as{asp = NewASPs}
+			end,
+			ok = mnesia:write(NewAS);
+		[] ->
+			ok
+	end,
+	case mnesia:read(m3ua_asp, Fsm, write) of
+		[#m3ua_asp{rc = RC}] ->
+			mnesia:delete(m3ua_asp, Fsm, write);
+		_ ->
+			ok
 	end.
 
 %% @hidden

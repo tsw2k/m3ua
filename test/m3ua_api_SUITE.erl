@@ -100,7 +100,7 @@ all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
-			sgp_asp_up_active,
+			sgp_asp_up_active, sgp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
 			asp_inactive_to_down, asp_active_to_down,
@@ -455,6 +455,62 @@ sgp_asp_up_active(_Config) ->
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 
+sgp_deregister() ->
+	[{userdata, [{doc, "ASP DOWN, and ASP UP at an active asp, deregister the routing keys the asp registered (RFC 4666 4.3.4)."}]}].
+
+sgp_deregister(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_asp(),
+	AspUp = raw_msg(?ASPSMMessage, ?ASPSMASPUP),
+	AspDown = raw_msg(?ASPSMMessage, ?ASPSMASPDN),
+	AspActive = raw_msg(?ASPTMMessage, ?ASPTMASPAC),
+	%% Register, then ASP DOWN: the asp leaves the application server
+	%% it joined. asp_status/2 is answered only once the ASP DOWN has
+	%% been dealt with in full, acknowledgement and all.
+	ok = raw_put(Peer, PeerAssoc, AspUp),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	RC1 = raw_register(Peer, PeerAssoc),
+	[_] = as_asps(RC1),
+	ok = raw_put(Peer, PeerAssoc, AspDown),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPDNACK),
+	down = m3ua:asp_status(EP, Assoc),
+	[] = as_asps(RC1),
+	%% Register again, go active, then ASP UP: the same.
+	ok = raw_put(Peer, PeerAssoc, AspUp),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	RC2 = raw_register(Peer, PeerAssoc),
+	ok = raw_put(Peer, PeerAssoc, AspActive),
+	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPACACK),
+	active = m3ua:asp_status(EP, Assoc),
+	[_] = as_asps(RC2),
+	ok = raw_put(Peer, PeerAssoc, AspUp),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	#m3ua{} = raw_expect(Peer, ?MGMTMessage, ?MGMTError),
+	inactive = m3ua:asp_status(EP, Assoc),
+	[] = as_asps(RC2),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+%% @hidden
+%% 	Register one routing key with a REG REQ and answer the routing
+%% 	context the REG RSP gives it.
+raw_register(Peer, PeerAssoc) ->
+	Keys = [{rand:uniform(16383), [], []}],
+	RK = m3ua_codec:routing_key(#m3ua_routing_key{na = 0,
+			tmt = loadshare, key = Keys, lrk_id = 1}),
+	Params = m3ua_codec:parameters([{?RoutingKey, RK}]),
+	RegReq = #m3ua{class = ?RKMMessage, type = ?RKMREGREQ, params = Params},
+	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(RegReq)),
+	#m3ua{params = RspParams} = raw_expect(Peer, ?RKMMessage, ?RKMREGRSP),
+	[#registration_result{status = registered, rc = RC}] =
+			m3ua_codec:get_all_parameter(?RegistrationResult,
+			m3ua_codec:parameters(RspParams)),
+	RC.
+
+%% @hidden
+as_asps(RC) ->
+	[#m3ua_as{asp = ASPs}] = mnesia:dirty_read(m3ua_as, RC),
+	ASPs.
+
 %% @hidden
 %% 	The same plain SCTP socket as protocol_identifier/1, standing in
 %% 	for a signalling gateway so as to put on the wire what m3ua
@@ -506,6 +562,23 @@ raw_send(Peer, PeerAssoc, Packet) ->
 raw_put(Peer, PeerAssoc, Packet) ->
 	SndRcvInfo = #sctp_sndrcvinfo{assoc_id = PeerAssoc, ppid = 3},
 	gen_sctp:send(Peer, SndRcvInfo, Packet).
+
+%% @hidden
+%% 	The next message of a class and type, passing over any NTFY an
+%% 	sgp sends as the state of an application server changes.
+raw_expect(Peer, Class, Type) ->
+	case raw_get(Peer) of
+		#m3ua{class = Class, type = Type} = M3UA ->
+			M3UA;
+		#m3ua{class = ?MGMTMessage, type = ?MGMTNotify} ->
+			raw_expect(Peer, Class, Type);
+		Other ->
+			{unexpected, Other}
+	end.
+
+%% @hidden
+raw_msg(Class, Type) ->
+	m3ua_codec:m3ua(#m3ua{class = Class, type = Type, params = <<>>}).
 
 %% @hidden
 raw_get(Peer) ->
