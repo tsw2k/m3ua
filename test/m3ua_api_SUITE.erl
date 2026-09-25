@@ -99,7 +99,7 @@ sequences() ->
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
 			undecodable, unexpected, registration_results, ack_timeout,
-			inactive_timeout,
+			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
 			asp_inactive_to_down, asp_active_to_down,
@@ -252,7 +252,18 @@ undecodable() ->
 	[{userdata, [{doc, "A message that will not decode is answered with an ERR, and the association stays up."}]}].
 
 undecodable(_Config) ->
-	{Peer, PeerAssoc, EP, Assoc} = raw_sg(),
+	undecodable1(raw_sg()).
+
+sgp_undecodable() ->
+	[{userdata, [{doc, "A message that will not decode reaching a signalling gateway is answered with an ERR, and the association stays up."}]}].
+
+sgp_undecodable(_Config) ->
+	undecodable1(raw_asp()).
+
+%% @hidden
+%% 	Nothing here depends on which end m3ua is: check/1 reads the
+%% 	message before either state machine sees it.
+undecodable1({Peer, PeerAssoc, EP, Assoc}) ->
 	Send = fun(Packet) -> raw_send(Peer, PeerAssoc, Packet) end,
 	invalid_version = Send(<<2, 0, ?ASPSMMessage, ?ASPSMBEAT, 8:32>>),
 	protocol_error = Send(<<1, 0, ?ASPSMMessage, ?ASPSMBEAT, 12:32>>),
@@ -396,6 +407,25 @@ inactive_timeout(_Config) ->
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 
+sgp_unexpected() ->
+	[{userdata, [{doc, "A message no clause takes at a signalling gateway is answered with an ERR, and the association stays up."}]}].
+
+sgp_unexpected(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_asp(),
+	Send = fun(Packet) -> raw_send(Peer, PeerAssoc, Packet) end,
+	%% The sgp is down, and takes neither acknowledgements nor what a
+	%% signalling gateway sends rather than receives.
+	unexpected_message = Send(<<1, 0, ?ASPSMMessage, ?ASPSMBEATACK, 8:32>>),
+	unexpected_message = Send(<<1, 0, ?ASPTMMessage, ?ASPTMASPAC, 8:32>>),
+	unexpected_message = Send(<<1, 0, ?MGMTMessage, ?MGMTNotify,
+			16:32, ?Status:16, 8:16, 1:16, 3:16>>),
+	unexpected_message = Send(<<1, 0, ?SSNMMessage, ?SSNMDUNA,
+			16:32, ?AffectedPointCode:16, 8:16, 0, 1:24>>),
+	[Assoc] = m3ua:get_assoc(EP),
+	{ok, #{unexpected_in := 4, error_out := 4}} = m3ua:getcount(EP, Assoc),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
 %% @hidden
 %% 	The same plain SCTP socket as protocol_identifier/1, standing in
 %% 	for a signalling gateway so as to put on the wire what m3ua
@@ -414,6 +444,20 @@ raw_sg() ->
 		4000 ->
 			{error, no_association}
 	end,
+	[Assoc] = assoc(EP, 40),
+	{Peer, PeerAssoc, EP, Assoc}.
+
+%% @hidden
+%% 	A plain SCTP socket standing in for an application server
+%% 	process, connected to an m3ua signalling gateway listening on a
+%% 	port of its own choosing.
+raw_asp() ->
+	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+			[{role, sgp}, {ip, {127,0,0,1}}]),
+	{_, server, sgp, {_, Port}} = m3ua:get_ep(EP),
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	{ok, #sctp_assoc_change{state = comm_up, assoc_id = PeerAssoc}} =
+			gen_sctp:connect(Peer, {127,0,0,1}, Port, []),
 	[Assoc] = assoc(EP, 40),
 	{Peer, PeerAssoc, EP, Assoc}.
 
