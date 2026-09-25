@@ -98,7 +98,7 @@ sequences() ->
 %%
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
-			undecodable,
+			undecodable, unexpected,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
 			asp_inactive_to_down, asp_active_to_down,
@@ -251,37 +251,8 @@ undecodable() ->
 	[{userdata, [{doc, "A message that will not decode is answered with an ERR, and the association stays up."}]}].
 
 undecodable(_Config) ->
-	%% The same plain SCTP socket as protocol_identifier/1, here to
-	%% put on the wire what m3ua would never send itself.
-	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
-	ok = gen_sctp:listen(Peer, true),
-	{ok, {_, Port}} = inet:sockname(Peer),
-	{ok, EP} = m3ua:start(callback(make_ref()), 0,
-			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
-	PeerAssoc = receive
-		{sctp, Peer, _, _, {_, #sctp_assoc_change{state = comm_up,
-				assoc_id = Id}}} ->
-			Id
-	after
-		4000 ->
-			{error, no_association}
-	end,
-	[Assoc] = assoc(EP, 40),
-	Send = fun(Packet) ->
-			SndRcvInfo = #sctp_sndrcvinfo{assoc_id = PeerAssoc, ppid = 3},
-			ok = gen_sctp:send(Peer, SndRcvInfo, Packet),
-			receive
-				{sctp, Peer, _, _, {[#sctp_sndrcvinfo{}], Data}}
-						when is_binary(Data) ->
-					#m3ua{class = ?MGMTMessage, type = ?MGMTError,
-							params = Params} = m3ua_codec:m3ua(Data),
-					Parameters = m3ua_codec:parameters(Params),
-					m3ua_codec:fetch_parameter(?ErrorCode, Parameters)
-			after
-				1000 ->
-					nothing_sent
-			end
-	end,
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(),
+	Send = fun(Packet) -> raw_send(Peer, PeerAssoc, Packet) end,
 	invalid_version = Send(<<2, 0, ?ASPSMMessage, ?ASPSMBEAT, 8:32>>),
 	protocol_error = Send(<<1, 0, ?ASPSMMessage, ?ASPSMBEAT, 12:32>>),
 	unsupported_message_class = Send(<<1, 0, 7, 1, 8:32>>),
@@ -299,6 +270,61 @@ undecodable(_Config) ->
 	{ok, #{undecodable_in := 7, error_out := 6}} = m3ua:getcount(EP, Assoc),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+unexpected() ->
+	[{userdata, [{doc, "A message no clause takes in this state is answered with an ERR, and the association stays up."}]}].
+
+unexpected(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(),
+	Send = fun(Packet) -> raw_send(Peer, PeerAssoc, Packet) end,
+	%% The asp is down: nothing has been asked of the peer, so neither
+	%% an acknowledgement nor traffic is expected yet.
+	unexpected_message = Send(<<1, 0, ?ASPSMMessage, ?ASPSMBEATACK, 8:32>>),
+	unexpected_message = Send(<<1, 0, ?ASPTMMessage, ?ASPTMASPIAACK, 8:32>>),
+	unexpected_message = Send(<<1, 0, ?TransferMessage, ?TransferMessageData,
+			28:32, ?ProtocolData:16, 20:16, 1:32, 2:32, 3, 2, 0, 0, "abcd">>),
+	[Assoc] = m3ua:get_assoc(EP),
+	{ok, #{unexpected_in := 3, error_out := 3}} = m3ua:getcount(EP, Assoc),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+%% @hidden
+%% 	The same plain SCTP socket as protocol_identifier/1, standing in
+%% 	for a signalling gateway so as to put on the wire what m3ua
+%% 	would never send itself.
+raw_sg() ->
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	ok = gen_sctp:listen(Peer, true),
+	{ok, {_, Port}} = inet:sockname(Peer),
+	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
+	PeerAssoc = receive
+		{sctp, Peer, _, _, {_, #sctp_assoc_change{state = comm_up,
+				assoc_id = Id}}} ->
+			Id
+	after
+		4000 ->
+			{error, no_association}
+	end,
+	[Assoc] = assoc(EP, 40),
+	{Peer, PeerAssoc, EP, Assoc}.
+
+%% @hidden
+%% 	Send a message and answer the error code of the ERR it draws.
+raw_send(Peer, PeerAssoc, Packet) ->
+	SndRcvInfo = #sctp_sndrcvinfo{assoc_id = PeerAssoc, ppid = 3},
+	ok = gen_sctp:send(Peer, SndRcvInfo, Packet),
+	receive
+		{sctp, Peer, _, _, {[#sctp_sndrcvinfo{}], Data}}
+				when is_binary(Data) ->
+			#m3ua{class = ?MGMTMessage, type = ?MGMTError,
+					params = Params} = m3ua_codec:m3ua(Data),
+			Parameters = m3ua_codec:parameters(Params),
+			m3ua_codec:fetch_parameter(?ErrorCode, Parameters)
+	after
+		1000 ->
+			nothing_sent
+	end.
 
 %% @hidden
 assoc(_EP, 0) ->

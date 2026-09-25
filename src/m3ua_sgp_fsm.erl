@@ -1313,14 +1313,15 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMBEAT, params = Params},
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
-	end.
+	end;
+handle_sgp(#m3ua{} = M3UA, StateName, Stream, StateData) ->
+	unexpected(M3UA, StateName, Stream, StateData).
 
 %% @hidden
 %% 	Discard a message that will not decode, and answer it with an
 %% 	ERR -- unless it was itself an ERR, which is never answered.
 undecodable(Packet, Reason, StateName, Stream,
-		#statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort,
-		ppid = Ppid, receiver = Receiver, active = Active,
+		#statedata{receiver = Receiver, active = Active,
 		ep = EP, assoc = Assoc, count = Count} = StateData) ->
 	?LOG_WARNING("Message would not decode",
 			#{layer => m3ua, ep => EP, assoc => Assoc,
@@ -1329,28 +1330,50 @@ undecodable(Packet, Reason, StateName, Stream,
 			#{layer => m3ua, ep => EP, assoc => Assoc, packet => Packet}),
 	Undecodable = maps:get(undecodable_in, Count, 0),
 	NewCount = maps:put(undecodable_in, Undecodable + 1, Count),
+	NewStateData = StateData#statedata{count = NewCount},
 	case Packet of
 		<<_, _, ?MGMTMessage, ?MGMTError, _/binary>> ->
 			ok = m3ua_receiver:replenish(Receiver, Active),
-			{next_state, StateName, StateData#statedata{count = NewCount}};
+			{next_state, StateName, NewStateData};
 		_ ->
-			P0 = m3ua_codec:add_parameter(?ErrorCode, Reason, []),
-			ErrorParams = m3ua_codec:parameters(P0),
-			ErrorMsg = #m3ua{class = ?MGMTMessage,
-					type = ?MGMTError, params = ErrorParams},
-			ErrorPacket = m3ua_codec:m3ua(ErrorMsg),
-			case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, ErrorPacket) of
-				ok ->
-					ok = m3ua_receiver:replenish(Receiver, Active),
-					ErrorOut = maps:get(error_out, NewCount, 0),
-					NextCount = maps:put(error_out, ErrorOut + 1, NewCount),
-					{next_state, StateName, StateData#statedata{count = NextCount}};
-				{error, eagain} ->
-					% @todo flow control
-					{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
-				{error, Reason1} ->
-					{stop, {shutdown, {{EP, Assoc}, Reason1}}, StateData}
-			end
+			send_error(Reason, StateName, NewStateData)
+	end.
+
+%% @hidden
+%% 	Discard a message that decodes but that no clause takes in this
+%% 	state, and answer it with an ERR.
+unexpected(#m3ua{class = Class, type = Type}, StateName, Stream,
+		#statedata{ep = EP, assoc = Assoc, count = Count} = StateData) ->
+	?LOG_NOTICE("Message discarded",
+			#{layer => m3ua, ep => EP, assoc => Assoc, stream => Stream,
+			state => StateName, class => Class, type => Type,
+			reason => unexpected_message}),
+	Unexpected = maps:get(unexpected_in, Count, 0),
+	NewCount = maps:put(unexpected_in, Unexpected + 1, Count),
+	send_error(unexpected_message, StateName,
+			StateData#statedata{count = NewCount}).
+
+%% @hidden
+send_error(ErrorCode, StateName,
+		#statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort,
+		ppid = Ppid, receiver = Receiver, active = Active,
+		ep = EP, assoc = Assoc, count = Count} = StateData) ->
+	P0 = m3ua_codec:add_parameter(?ErrorCode, ErrorCode, []),
+	ErrorParams = m3ua_codec:parameters(P0),
+	ErrorMsg = #m3ua{class = ?MGMTMessage,
+			type = ?MGMTError, params = ErrorParams},
+	Packet = m3ua_codec:m3ua(ErrorMsg),
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+		ok ->
+			ok = m3ua_receiver:replenish(Receiver, Active),
+			ErrorOut = maps:get(error_out, Count, 0),
+			NewCount = maps:put(error_out, ErrorOut + 1, Count),
+			{next_state, StateName, StateData#statedata{count = NewCount}};
+		{error, eagain} ->
+			% @todo flow control
+			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
+		{error, Reason} ->
+			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end.
 
 %% @private
