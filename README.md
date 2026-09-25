@@ -31,12 +31,11 @@ that goes no further** because of the configuration or the peer; `warning` and
 above are faults.
 
 **The traffic path follows it; the rest does not yet.** `m3ua_asp_fsm`,
-`m3ua_sgp_fsm` and `m3ua_lm_server` say where a message stops and why, and
-the two state machines say once when an association stops and starts
-carrying traffic. What remains is upstream's `error_logger` reporting, which
+`m3ua_sgp_fsm` and `m3ua_lm_server` say where a message stops and why, the
+two state machines say once when an association stops and starts carrying
+traffic, and a message that will not decode is a `warning` and an ERR back
+to the peer. What remains is upstream's `error_logger` reporting, which
 predates the convention by years: all of `m3ua_app`, `m3ua_listen_fsm`,
 `m3ua_connect_fsm` and `m3ua_rest_prometheus`, the shutdown report in
 `m3ua_lm_server`, and in the two state machines the reports of an SCTP error,
-a socket that will not close and an ERR from the peer. A message that
-will not decode is not reported at all: the codec fails and takes the state
-machine with it.
+a socket that will not close and an ERR from the peer.

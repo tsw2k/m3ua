@@ -22,6 +22,7 @@
 -copyright('Copyright (c) 2015-2025 SigScale Global Inc.').
 
 -export([m3ua/1]).
+-export([check/1]).
 -export([parameters/1, routing_key/1]).
 
 -export([add_parameter/3, store_parameter/3,
@@ -119,6 +120,48 @@ m3ua(#m3ua{params = Data} = M3UA) when is_list(Data) ->
 m3ua(#m3ua{version = Version, class = Class, type = Type, params = Data}) when is_binary(Data) ->
 	Len = size(Data) + 8,
 	<<Version, 0, Class, Type, Len:32, Data/binary>>.
+
+-spec check(Message) -> Result
+	when
+		Message :: binary(),
+		Result :: {ok, #m3ua{}} | {error, ErrorCode},
+		ErrorCode :: invalid_version | unsupported_message_class
+				| unsupported_message_type | parameter_field_error
+				| invalid_parameter_value | protocol_error.
+%% @doc Decode a received message, or say why it will not decode.
+%%
+%% 	{@link m3ua/1} reads the common header alone, and the parameters
+%% 	are read later by whichever clause handles the message, so a
+%% 	message that will not decode fails wherever that happens to be.
+%% 	This reads all of it first. The error is the one RFC4666,
+%% 	Section-3.8.1 gives an ERR message for.
+%%
+check(<<Version, _/binary>>) when Version /= 1 ->
+	{error, invalid_version};
+check(<<1, _Reserved, Class, Type, Len:32, Data/binary>> = Message)
+		when Len == size(Message) ->
+	case message_type(Class, Type) of
+		ok ->
+			check1(#m3ua{class = Class, type = Type, params = Data});
+		{error, Reason} ->
+			{error, Reason}
+	end;
+check(_) ->
+	{error, protocol_error}.
+%% @hidden
+check1(#m3ua{params = Data} = M3UA) ->
+	case fields(Data) of
+		ok ->
+			try parameters(Data) of
+				_ ->
+					{ok, M3UA}
+			catch
+				_:_ ->
+					{error, invalid_parameter_value}
+			end;
+		error ->
+			{error, parameter_field_error}
+	end.
 
 -spec parameters(Message) -> Message
 	when
@@ -406,6 +449,48 @@ parameter(?DeregistrationStatus, _, Acc) ->
 	Acc;
 parameter(_, _, Acc) ->
 	Acc.
+
+%% @hidden
+message_type(?MGMTMessage, Type)
+		when Type =< ?MGMTNotify ->
+	ok;
+message_type(?TransferMessage, ?TransferMessageData) ->
+	ok;
+message_type(?SSNMMessage, Type)
+		when Type >= ?SSNMDUNA, Type =< ?SSNMDRST ->
+	ok;
+message_type(?ASPSMMessage, Type)
+		when Type >= ?ASPSMASPUP, Type =< ?ASPSMBEATACK ->
+	ok;
+message_type(?ASPTMMessage, Type)
+		when Type >= ?ASPTMASPAC, Type =< ?ASPTMASPIAACK ->
+	ok;
+message_type(?RKMMessage, Type)
+		when Type >= ?RKMREGREQ, Type =< ?RKMDEREGRSP ->
+	ok;
+message_type(Class, _)
+		when Class == ?MGMTMessage; Class == ?TransferMessage;
+		Class == ?SSNMMessage; Class == ?ASPSMMessage;
+		Class == ?ASPTMMessage; Class == ?RKMMessage ->
+	{error, unsupported_message_type};
+message_type(_, _) ->
+	{error, unsupported_message_class}.
+
+%% @hidden
+%% 	Walk the parameters as parameters/2 will, but only to see that
+%% 	each one's length stays inside the message.
+fields(<<_Tag:16, Len:16, Rest/binary>>) when Len >= 4 ->
+	Skip = Len - 4 + ((4 - (Len rem 4)) rem 4),
+	case Rest of
+		<<_:Skip/binary, Next/binary>> ->
+			fields(Next);
+		_ ->
+			error
+	end;
+fields(Pad) when size(Pad) < 4 ->
+	ok;
+fields(_) ->
+	error.
 
 
 -type mtp3_user() :: sccp | tup | isup | broadband_isup

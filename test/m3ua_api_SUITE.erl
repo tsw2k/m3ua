@@ -98,6 +98,7 @@ sequences() ->
 %%
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
+			undecodable,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
 			asp_inactive_to_down, asp_active_to_down,
@@ -243,6 +244,59 @@ protocol_identifier(_Config) ->
 		4000 ->
 			{error, nothing_sent}
 	end,
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+undecodable() ->
+	[{userdata, [{doc, "A message that will not decode is answered with an ERR, and the association stays up."}]}].
+
+undecodable(_Config) ->
+	%% The same plain SCTP socket as protocol_identifier/1, here to
+	%% put on the wire what m3ua would never send itself.
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	ok = gen_sctp:listen(Peer, true),
+	{ok, {_, Port}} = inet:sockname(Peer),
+	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
+	PeerAssoc = receive
+		{sctp, Peer, _, _, {_, #sctp_assoc_change{state = comm_up,
+				assoc_id = Id}}} ->
+			Id
+	after
+		4000 ->
+			{error, no_association}
+	end,
+	[Assoc] = assoc(EP, 40),
+	Send = fun(Packet) ->
+			SndRcvInfo = #sctp_sndrcvinfo{assoc_id = PeerAssoc, ppid = 3},
+			ok = gen_sctp:send(Peer, SndRcvInfo, Packet),
+			receive
+				{sctp, Peer, _, _, {[#sctp_sndrcvinfo{}], Data}}
+						when is_binary(Data) ->
+					#m3ua{class = ?MGMTMessage, type = ?MGMTError,
+							params = Params} = m3ua_codec:m3ua(Data),
+					Parameters = m3ua_codec:parameters(Params),
+					m3ua_codec:fetch_parameter(?ErrorCode, Parameters)
+			after
+				1000 ->
+					nothing_sent
+			end
+	end,
+	invalid_version = Send(<<2, 0, ?ASPSMMessage, ?ASPSMBEAT, 8:32>>),
+	protocol_error = Send(<<1, 0, ?ASPSMMessage, ?ASPSMBEAT, 12:32>>),
+	unsupported_message_class = Send(<<1, 0, 7, 1, 8:32>>),
+	unsupported_message_type = Send(<<1, 0, ?ASPSMMessage, 9, 8:32>>),
+	%% Heartbeat Data claiming eight octets of value with four present.
+	parameter_field_error = Send(<<1, 0, ?ASPSMMessage, ?ASPSMBEAT,
+			16:32, ?HeartbeatData:16, 12:16, 0:32>>),
+	%% An Affected Point Code with a mask other than zero.
+	invalid_parameter_value = Send(<<1, 0, ?SSNMMessage, ?SSNMDUNA,
+			16:32, ?AffectedPointCode:16, 8:16, 1, 0:24>>),
+	%% An ERR with an error code nobody defined is not answered.
+	nothing_sent = Send(<<1, 0, ?MGMTMessage, ?MGMTError,
+			16:32, ?ErrorCode:16, 8:16, 99:32>>),
+	[Assoc] = m3ua:get_assoc(EP),
+	{ok, #{undecodable_in := 7, error_out := 6}} = m3ua:getcount(EP, Assoc),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 

@@ -1161,7 +1161,12 @@ handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
 
 %% @hidden
 handle_asp(M3UA, StateName, Stream, StateData) when is_binary(M3UA) ->
-	handle_asp(m3ua_codec:m3ua(M3UA), StateName, Stream, StateData);
+	case m3ua_codec:check(M3UA) of
+		{ok, Message} ->
+			handle_asp(Message, StateName, Stream, StateData);
+		{error, Reason} ->
+			undecodable(M3UA, Reason, StateName, Stream, StateData)
+	end;
 handle_asp(#m3ua{class = ?MGMTMessage, type = ?MGMTNotify, params = Params},
 		StateName, _Stream, #statedata{socket = _Socket, receiver = Receiver, active = Active,
 		callback = CbMod, cb_state = CbState, count = Count} = StateData) ->
@@ -1437,6 +1442,44 @@ handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMBEAT, params = Params},
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
+	end.
+
+%% @hidden
+%% 	Discard a message that will not decode, and answer it with an
+%% 	ERR -- unless it was itself an ERR, which is never answered.
+undecodable(Packet, Reason, StateName, Stream,
+		#statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort,
+		ppid = Ppid, receiver = Receiver, active = Active,
+		ep = EP, assoc = Assoc, count = Count} = StateData) ->
+	?LOG_WARNING("Message would not decode",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			stream => Stream, reason => Reason}),
+	?LOG_DEBUG("Message would not decode",
+			#{layer => m3ua, ep => EP, assoc => Assoc, packet => Packet}),
+	Undecodable = maps:get(undecodable_in, Count, 0),
+	NewCount = maps:put(undecodable_in, Undecodable + 1, Count),
+	case Packet of
+		<<_, _, ?MGMTMessage, ?MGMTError, _/binary>> ->
+			ok = m3ua_receiver:replenish(Receiver, Active),
+			{next_state, StateName, StateData#statedata{count = NewCount}};
+		_ ->
+			P0 = m3ua_codec:add_parameter(?ErrorCode, Reason, []),
+			ErrorParams = m3ua_codec:parameters(P0),
+			ErrorMsg = #m3ua{class = ?MGMTMessage,
+					type = ?MGMTError, params = ErrorParams},
+			ErrorPacket = m3ua_codec:m3ua(ErrorMsg),
+			case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, ErrorPacket) of
+				ok ->
+					ok = m3ua_receiver:replenish(Receiver, Active),
+					ErrorOut = maps:get(error_out, NewCount, 0),
+					NextCount = maps:put(error_out, ErrorOut + 1, NewCount),
+					{next_state, StateName, StateData#statedata{count = NextCount}};
+				{error, eagain} ->
+					% @todo flow control
+					{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
+				{error, Reason1} ->
+					{stop, {shutdown, {{EP, Assoc}, Reason1}}, StateData}
+			end
 	end.
 
 %% @hidden
