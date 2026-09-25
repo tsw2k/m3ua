@@ -98,7 +98,7 @@ sequences() ->
 %%
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
-			undecodable, unexpected, registration_results,
+			undecodable, unexpected, registration_results, ack_timeout,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
 			asp_inactive_to_down, asp_active_to_down,
@@ -331,6 +331,35 @@ registration_results(_Config) ->
 	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(RegRsp2)),
 	{ok, RC} = receive {register, RegResult} -> RegResult after 4000 -> timeout end,
 	{ok, #{unexpected_in := 1}} = m3ua:getcount(EP, Assoc),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+ack_timeout() ->
+	[{userdata, [{doc, "A request times out while other messages keep arriving."}]}].
+
+ack_timeout(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(),
+	Self = self(),
+	_ = spawn(fun() -> Self ! {asp_up, m3ua:asp_up(EP, Assoc)} end),
+	#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP} = raw_get(Peer),
+	%% No ASP UP ACK, but a BEAT every half second for five seconds:
+	%% each would have cancelled a gen_fsm timeout, and the request
+	%% would have waited for ever.
+	BeatMsg = #m3ua{class = ?ASPSMMessage, type = ?ASPSMBEAT, params = <<>>},
+	Beat = m3ua_codec:m3ua(BeatMsg),
+	F = fun F(0) ->
+				no_answer;
+			F(N) ->
+				ok = raw_put(Peer, PeerAssoc, Beat),
+				receive
+					{asp_up, Result} ->
+						Result
+				after
+					500 ->
+						F(N - 1)
+				end
+	end,
+	{error, timeout} = F(10),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 

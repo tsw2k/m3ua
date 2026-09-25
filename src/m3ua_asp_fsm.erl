@@ -289,6 +289,7 @@
 				AsState :: down | inactive | active | pending}],
 		ual :: undefined | integer(),
 		req :: undefined | tuple(),
+		timer :: undefined | reference(),
 		ep :: pid(),
 		ep_name :: term(),
 		callback :: atom() | #m3ua_fsm_cb{},
@@ -477,6 +478,17 @@ down(timeout, #statedata{req = {'M-ASP_UP', Ref, From}} = StateData) ->
 	gen_server:cast(From, {'M-ASP_UP', confirm, Ref, {error, timeout}}),
 	NewStateData = StateData#statedata{req = undefined},
 	{next_state, down, NewStateData};
+%% An ASP DOWN ACK takes the asp down with any other request still
+%% outstanding, and that request's timer still runs.
+down(timeout, #statedata{req = {'M-RK_REG', Ref, From, _RK}} = StateData) ->
+	gen_server:cast(From, {'M-RK_REG', confirm, Ref, {error, timeout}}),
+	NewStateData = StateData#statedata{req = undefined},
+	{next_state, down, NewStateData};
+down(timeout, #statedata{req = {AspOp, Ref, From}} = StateData)
+		when AspOp == 'M-ASP_ACTIVE'; AspOp == 'M-ASP_INACTIVE' ->
+	gen_server:cast(From, {AspOp, confirm, Ref, {error, timeout}}),
+	NewStateData = StateData#statedata{req = undefined},
+	{next_state, down, NewStateData};
 down(timeout, #statedata{ep = EP, assoc = Assoc, receiver = undefined,
 		socket = Socket, active = Active,
 		callback = CbMod, cb_state = CbState} = StateData) ->
@@ -504,8 +516,9 @@ down({'M-ASP_UP', request, Ref, From},
 			Req = {'M-ASP_UP', Ref, From},
 			UpOut = maps:get(up_out, Count, 0),
 			NewCount = maps:put(up_out, UpOut + 1, Count),
-			NewStateData = StateData#statedata{req = Req, count = NewCount},
-			{next_state, down, NewStateData, ?Tack};
+			NewStateData = start_tack(StateData#statedata{req = Req,
+					count = NewCount}),
+			{next_state, down, NewStateData};
 		{error, eagain} ->
 			% @todo flow control
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
@@ -577,8 +590,9 @@ inactive({'M-ASP_ACTIVE', request, Ref, From},
 			Req = {'M-ASP_ACTIVE', Ref, From},
 			ActiveOut = maps:get(active_out, Count, 0),
 			NewCount = maps:put(active_out, ActiveOut + 1, Count),
-			NewStateData = StateData#statedata{req = Req, count = NewCount},
-			{next_state, inactive, NewStateData, ?Tack};
+			NewStateData = start_tack(StateData#statedata{req = Req,
+					count = NewCount}),
+			{next_state, inactive, NewStateData};
 		{error, eagain} ->
 			% @todo flow control
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
@@ -595,8 +609,9 @@ inactive({'M-ASP_DOWN', request, Ref, From},
 			Req = {'M-ASP_DOWN', Ref, From},
 			DownOut = maps:get(down_out, Count, 0),
 			NewCount = maps:put(down_out, DownOut + 1, Count),
-			NewStateData = StateData#statedata{req = Req, count = NewCount},
-			{next_state, inactive, NewStateData, ?Tack};
+			NewStateData = start_tack(StateData#statedata{req = Req,
+					count = NewCount}),
+			{next_state, inactive, NewStateData};
 		{error, eagain} ->
 			% @todo flow control
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
@@ -715,8 +730,9 @@ active({'M-ASP_INACTIVE', request, Ref, From},
 			Req = {'M-ASP_INACTIVE', Ref, From},
 			InactiveOut = maps:get(inactive_out, Count, 0),
 			NewCount = maps:put(inactive_out, InactiveOut + 1, Count),
-			NewStateData = StateData#statedata{req = Req, count = NewCount},
-			{next_state, active, NewStateData, ?Tack};
+			NewStateData = start_tack(StateData#statedata{req = Req,
+					count = NewCount}),
+			{next_state, active, NewStateData};
 		{error, eagain} ->
 			% @todo flow control
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
@@ -733,8 +749,9 @@ active({'M-ASP_DOWN', request, Ref, From},
 			Req = {'M-ASP_DOWN', Ref, From},
 			DownOut = maps:get(down_out, Count, 0),
 			NewCount = maps:put(down_out, DownOut + 1, Count),
-			NewStateData = StateData#statedata{req = Req, count = NewCount},
-			{next_state, active, NewStateData, ?Tack};
+			NewStateData = start_tack(StateData#statedata{req = Req,
+					count = NewCount}),
+			{next_state, active, NewStateData};
 		{error, eagain} ->
 			% @todo flow control
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
@@ -906,6 +923,12 @@ handle_sync_event(getcount, _From, StateName,
 %% @see //stdlib/gen_fsm:handle_info/3
 %% @private
 %%
+handle_info({timeout, Timer, tack}, StateName,
+		#statedata{timer = Timer, req = Req} = StateData)
+		when Req /= undefined ->
+	?MODULE:StateName(timeout, StateData#statedata{timer = undefined});
+handle_info({timeout, _Timer, tack}, StateName, StateData) ->
+	{next_state, StateName, StateData};
 handle_info({sctp, Socket, _PeerAddr, _PeerPort,
 		{[#sctp_sndrcvinfo{stream = Stream}], Data}},
 		StateName, #statedata{socket = Socket} = StateData)
@@ -1134,8 +1157,8 @@ handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
 	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Message) of
 		ok ->
 			Req = {'M-RK_REG', Ref, From, RK},
-			NewStateData = StateData#statedata{req = Req},
-			{next_state, StateName, NewStateData, ?Tack};
+			NewStateData = start_tack(StateData#statedata{req = Req}),
+			{next_state, StateName, NewStateData};
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
@@ -1328,7 +1351,7 @@ handle_asp(#m3ua{class = ?RKMMessage, type = ?RKMREGRSP, params = Params},
 			{next_state, StateName, NewStateData};
 		false ->
 			%% Most likely the answer to an earlier request that timed
-			%% out. Ours may still come, so wait for it as long again.
+			%% out. Ours may still come, so go on waiting for it.
 			?LOG_NOTICE("Registration response discarded",
 					#{layer => m3ua, ep => EP, assoc => Assoc, lrk_id => LrkId,
 					results => RegResults, reason => unknown_lrk_id}),
@@ -1336,7 +1359,7 @@ handle_asp(#m3ua{class = ?RKMMessage, type = ?RKMREGRSP, params = Params},
 			Unexpected = maps:get(unexpected_in, Count, 0),
 			NewCount = maps:put(unexpected_in, Unexpected + 1, Count),
 			NewStateData = StateData#statedata{count = NewCount},
-			{next_state, StateName, NewStateData, ?Tack}
+			{next_state, StateName, NewStateData}
 	end;
 handle_asp(#m3ua{class = ?MGMTMessage, type = ?MGMTError, params = Params},
 		StateName, _Stream, #statedata{req = {'M-RK_REG', Ref, From, _RK},
@@ -1520,6 +1543,21 @@ send_error(ErrorCode, StateName,
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end.
+
+%% @hidden
+%% 	Time the acknowledgement of the request just sent. A gen_fsm
+%% 	timeout would not do: any message at all cancels it, so traffic
+%% 	arriving while the acknowledgement is awaited left the request
+%% 	outstanding for ever. A timer that fires after its request has
+%% 	been answered, or been replaced, is ignored by handle_info/3.
+start_tack(#statedata{timer = Timer} = StateData) ->
+	case Timer of
+		undefined ->
+			ok;
+		_ ->
+			erlang:cancel_timer(Timer)
+	end,
+	StateData#statedata{timer = erlang:start_timer(?Tack, self(), tack)}.
 
 %% @hidden
 generate_lrk_id() ->
