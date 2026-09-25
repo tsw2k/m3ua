@@ -100,7 +100,7 @@ all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
-			sgp_asp_up_active, sgp_deregister,
+			sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
 			asp_inactive_to_down, asp_active_to_down,
@@ -489,6 +489,55 @@ sgp_deregister(_Config) ->
 	[] = as_asps(RC2),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+sgp_dereg_req() ->
+	[{userdata, [{doc, "A DEREG REQ is answered for each routing context in it (RFC 4666 4.4.2)."}]}].
+
+sgp_dereg_req(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_asp(),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	RC1 = raw_register(Peer, PeerAssoc),
+	RC2 = raw_register(Peer, PeerAssoc),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPAC)),
+	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPACACK),
+	%% Not while active in it.
+	[{RC1, asp_currently_active}] = raw_dereg(Peer, PeerAssoc, [RC1]),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPIA)),
+	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPIAACK),
+	%% Inactive, it may; a context nobody has is invalid.
+	Bogus = unused_rc(),
+	[{RC1, deregistered}, {Bogus, invalid_rc}]
+			= raw_dereg(Peer, PeerAssoc, [RC1, Bogus]),
+	[] = as_asps(RC1),
+	[_] = as_asps(RC2),
+	%% Once gone, it is not registered.
+	[{RC1, not_registered}] = raw_dereg(Peer, PeerAssoc, [RC1]),
+	{ok, #{dereg_in := 3, dereg_rsp_out := 3}} = m3ua:getcount(EP, Assoc),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+%% @hidden
+%% 	Send a DEREG REQ and answer the results of the DEREG RSP.
+raw_dereg(Peer, PeerAssoc, RCs) ->
+	Params = m3ua_codec:parameters([{?RoutingContext, RCs}]),
+	DeregReq = #m3ua{class = ?RKMMessage, type = ?RKMDEREGREQ,
+			params = Params},
+	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(DeregReq)),
+	#m3ua{params = RspParams} = raw_expect(Peer, ?RKMMessage, ?RKMDEREGRSP),
+	[{RC, Status} || #deregistration_result{rc = RC, status = Status}
+			<- m3ua_codec:get_all_parameter(?DeregistrationResult,
+			m3ua_codec:parameters(RspParams))].
+
+%% @hidden
+unused_rc() ->
+	RC = rand:uniform(16#ffffffff),
+	case mnesia:dirty_read(m3ua_as, RC) of
+		[] ->
+			RC;
+		_ ->
+			unused_rc()
+	end.
 
 %% @hidden
 %% 	Register one routing key with a REG REQ and answer the routing

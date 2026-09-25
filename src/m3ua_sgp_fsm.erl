@@ -1176,6 +1176,12 @@ handle_sgp(#m3ua{class = ?RKMMessage, type = ?RKMREGREQ, params = Params},
 	Parameters = m3ua_codec:parameters(Params),
 	RKs = m3ua_codec:get_all_parameter(?RoutingKey, Parameters),
 	reg_request(RKs, StateName, StateData);
+handle_sgp(#m3ua{class = ?RKMMessage, type = ?RKMDEREGREQ, params = Params},
+		StateName, _Stream, StateData)
+		when StateName == inactive; StateName == active ->
+	Parameters = m3ua_codec:parameters(Params),
+	RCs = m3ua_codec:fetch_parameter(?RoutingContext, Parameters),
+	dereg_request(RCs, StateName, StateData);
 handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC, params = Params},
 		inactive, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active,
 		assoc = Assoc, ep = EP, callback = CbMod, cb_state = CbState,
@@ -1734,6 +1740,93 @@ deregister(Reason, #statedata{registered = RCs, rks = RKs,
 					rcs => RCs, reason => Reason1}),
 			StateData
 	end.
+%% @hidden
+%% 	RFC4666, Section-4.4.2: deregister each routing context the asp
+%% 	registered and is not active in, and answer for every one of them
+%% 	in a single DEREG RSP.
+dereg_request(RCs, StateName,
+		#statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort,
+		ppid = Ppid, receiver = Receiver, active = Active,
+		ep = EP, assoc = Assoc, rks = RKs, registered = Registered,
+		count = Count} = StateData) ->
+	Fsm = self(),
+	F = fun() ->
+			[{RC, dereg_request1(Fsm, RC, Registered)} || RC <- RCs]
+	end,
+	Results = case mnesia:transaction(F) of
+		{atomic, Results1} ->
+			Results1;
+		{aborted, Reason} ->
+			?LOG_WARNING("Routing key deregistration failed",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					rcs => RCs, reason => Reason}),
+			[{RC, unknown} || RC <- RCs]
+	end,
+	Deregistered = [RC || {RC, deregistered} <- Results],
+	case Deregistered of
+		[] ->
+			ok;
+		_ ->
+			?LOG_NOTICE("Routing keys deregistered",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					rcs => Deregistered, reason => dereg_req})
+	end,
+	Frefused = fun({_RC, deregistered}) ->
+				ok;
+			({RC, Status}) ->
+				?LOG_NOTICE("Routing key deregistration refused",
+						#{layer => m3ua, ep => EP, assoc => Assoc,
+						rc => RC, reason => Status})
+	end,
+	ok = lists:foreach(Frefused, Results),
+	NewRKs = [RK || {RC, _, _} = RK <- RKs,
+			not lists:member(RC, Deregistered)],
+	NewStateData = StateData#statedata{rks = NewRKs,
+			registered = Registered -- Deregistered},
+	DeregResults = [{?DeregistrationResult,
+			#deregistration_result{rc = RC, status = Status}}
+			|| {RC, Status} <- Results],
+	DeregRsp = #m3ua{class = ?RKMMessage, type = ?RKMDEREGRSP,
+			params = DeregResults},
+	Packet = m3ua_codec:m3ua(DeregRsp),
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+		ok ->
+			ok = m3ua_receiver:replenish(Receiver, Active),
+			DeregIn = maps:get(dereg_in, Count, 0),
+			DeregRspOut = maps:get(dereg_rsp_out, Count, 0),
+			NewCount = maps:put(dereg_in, DeregIn + 1, Count),
+			NextCount = maps:put(dereg_rsp_out, DeregRspOut + 1, NewCount),
+			{next_state, StateName, NewStateData#statedata{count = NextCount}};
+		{error, eagain} ->
+			% @todo flow control
+			{stop, {shutdown, {{EP, Assoc}, eagain}}, NewStateData};
+		{error, Reason1} ->
+			{stop, {shutdown, {{EP, Assoc}, Reason1}}, NewStateData}
+	end.
+%% @hidden
+dereg_request1(Fsm, RC, Registered) ->
+	case mnesia:read(m3ua_as, RC, write) of
+		[] ->
+			invalid_rc;
+		[#m3ua_as{asp = ASPs}] ->
+			case lists:keyfind(Fsm, #m3ua_as_asp.fsm, ASPs) of
+				false ->
+					not_registered;
+				#m3ua_as_asp{state = active} ->
+					asp_currently_active;
+				#m3ua_as_asp{} ->
+					%% Membership given by configuration is not the
+					%% asp's to give up.
+					case lists:member(RC, Registered) of
+						true ->
+							ok = deregister1(Fsm, RC),
+							deregistered;
+						false ->
+							permission_denied
+					end
+			end
+	end.
+
 %% @hidden
 deregister1(Fsm, RC) ->
 	case mnesia:read(m3ua_as, RC, write) of
