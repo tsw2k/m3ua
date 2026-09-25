@@ -1292,15 +1292,20 @@ handle_asp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIAACK, params = Params},
 handle_asp(#m3ua{class = ?RKMMessage, type = ?RKMREGRSP, params = Params},
 		StateName, _Stream, #statedata{socket = _Socket, receiver = Receiver, active = Active,
 		rks = RKs, req = {'M-RK_REG', Ref, From,
-		#m3ua_routing_key{na = NA, tmt = Mode, as = AS, key = Keys}},
+		#m3ua_routing_key{na = NA, tmt = Mode, as = AS, key = Keys,
+		lrk_id = LrkId}},
 		callback = CbMod, cb_state = CbState, ep = EP,
-		assoc = Assoc} = StateData)
+		assoc = Assoc, count = Count} = StateData)
 		when StateName == inactive; StateName == active ->
    Parameters = m3ua_codec:parameters(Params),
 	SortedKeys = m3ua:sort(Keys),
 	RK = {NA, SortedKeys, Mode},
-   case m3ua_codec:get_all_parameter(?RegistrationResult, Parameters) of
-		[#registration_result{status = registered, rc = RC}] ->
+	%% A REG RSP carries a result for each routing key its REG REQ
+	%% did, each naming the key by its local identifier. Ours is the
+	%% one naming the key we sent.
+	RegResults = m3ua_codec:get_all_parameter(?RegistrationResult, Parameters),
+	case lists:keyfind(LrkId, #registration_result.lrk_id, RegResults) of
+		#registration_result{status = registered, rc = RC} ->
 			case reg_tables(RC, RK, AS, StateName) of
 				{ok, AsState} ->
 					NewRKs = lists:keystore(undefined, 1, RKs, {RC, RK, AsState}),
@@ -1314,13 +1319,24 @@ handle_asp(#m3ua{class = ?RKMMessage, type = ?RKMREGRSP, params = Params},
 				{error, Reason1} ->
 					{stop, {shutdown, {{EP, Assoc}, Reason1}}, StateData}
 			end;
-		[#registration_result{status = Status}] ->
+		#registration_result{status = Status} ->
 			?LOG_NOTICE("Routing key registration refused by peer",
 					#{layer => m3ua, ep => EP, assoc => Assoc, reason => Status}),
 			gen_server:cast(From, {'M-RK_REG', confirm, Ref, {error, Status}}),
 			ok = m3ua_receiver:replenish(Receiver, Active),
 			NewStateData = StateData#statedata{req = undefined},
-			{next_state, StateName, NewStateData}
+			{next_state, StateName, NewStateData};
+		false ->
+			%% Most likely the answer to an earlier request that timed
+			%% out. Ours may still come, so wait for it as long again.
+			?LOG_NOTICE("Registration response discarded",
+					#{layer => m3ua, ep => EP, assoc => Assoc, lrk_id => LrkId,
+					results => RegResults, reason => unknown_lrk_id}),
+			ok = m3ua_receiver:replenish(Receiver, Active),
+			Unexpected = maps:get(unexpected_in, Count, 0),
+			NewCount = maps:put(unexpected_in, Unexpected + 1, Count),
+			NewStateData = StateData#statedata{count = NewCount},
+			{next_state, StateName, NewStateData, ?Tack}
 	end;
 handle_asp(#m3ua{class = ?MGMTMessage, type = ?MGMTError, params = Params},
 		StateName, _Stream, #statedata{req = {'M-RK_REG', Ref, From, _RK},

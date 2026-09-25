@@ -98,7 +98,7 @@ sequences() ->
 %%
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
-			undecodable, unexpected,
+			undecodable, unexpected, registration_results,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
 			asp_inactive_to_down, asp_active_to_down,
@@ -295,6 +295,45 @@ unexpected(_Config) ->
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 
+registration_results() ->
+	[{userdata, [{doc, "A REG RSP is taken for the result naming the routing key asked for."}]}].
+
+registration_results(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(),
+	Self = self(),
+	_ = spawn(fun() -> Self ! {asp_up, m3ua:asp_up(EP, Assoc)} end),
+	#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP} = raw_get(Peer),
+	AspUpAck = #m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK},
+	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(AspUpAck)),
+	ok = receive {asp_up, UpResult} -> UpResult after 4000 -> timeout end,
+	Keys = [{rand:uniform(16383), [], []}],
+	_ = spawn(fun() ->
+			Self ! {register, m3ua:register(EP, Assoc,
+					undefined, 0, Keys, loadshare)}
+	end),
+	#m3ua{class = ?RKMMessage, type = ?RKMREGREQ,
+			params = ReqParams} = raw_get(Peer),
+	RoutingKey = m3ua_codec:fetch_parameter(?RoutingKey,
+			m3ua_codec:parameters(ReqParams)),
+	#m3ua_routing_key{lrk_id = LrkId} = m3ua_codec:routing_key(RoutingKey),
+	Other = {?RegistrationResult, #registration_result{
+			lrk_id = LrkId bxor 1, status = invalid_rk}},
+	RC = rand:uniform(16#ffff),
+	Ours = {?RegistrationResult, #registration_result{
+			lrk_id = LrkId, status = registered, rc = RC}},
+	%% An answer naming only another key -- a late one, say -- is not
+	%% ours, and the request still waits.
+	RegRsp1 = #m3ua{class = ?RKMMessage, type = ?RKMREGRSP, params = [Other]},
+	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(RegRsp1)),
+	%% An answer naming ours among others is taken for ours.
+	RegRsp2 = #m3ua{class = ?RKMMessage, type = ?RKMREGRSP,
+			params = [Other, Ours]},
+	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(RegRsp2)),
+	{ok, RC} = receive {register, RegResult} -> RegResult after 4000 -> timeout end,
+	{ok, #{unexpected_in := 1}} = m3ua:getcount(EP, Assoc),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
 %% @hidden
 %% 	The same plain SCTP socket as protocol_identifier/1, standing in
 %% 	for a signalling gateway so as to put on the wire what m3ua
@@ -319,15 +358,26 @@ raw_sg() ->
 %% @hidden
 %% 	Send a message and answer the error code of the ERR it draws.
 raw_send(Peer, PeerAssoc, Packet) ->
+	ok = raw_put(Peer, PeerAssoc, Packet),
+	case raw_get(Peer) of
+		#m3ua{class = ?MGMTMessage, type = ?MGMTError, params = Params} ->
+			Parameters = m3ua_codec:parameters(Params),
+			m3ua_codec:fetch_parameter(?ErrorCode, Parameters);
+		nothing_sent ->
+			nothing_sent
+	end.
+
+%% @hidden
+raw_put(Peer, PeerAssoc, Packet) ->
 	SndRcvInfo = #sctp_sndrcvinfo{assoc_id = PeerAssoc, ppid = 3},
-	ok = gen_sctp:send(Peer, SndRcvInfo, Packet),
+	gen_sctp:send(Peer, SndRcvInfo, Packet).
+
+%% @hidden
+raw_get(Peer) ->
 	receive
 		{sctp, Peer, _, _, {[#sctp_sndrcvinfo{}], Data}}
 				when is_binary(Data) ->
-			#m3ua{class = ?MGMTMessage, type = ?MGMTError,
-					params = Params} = m3ua_codec:m3ua(Data),
-			Parameters = m3ua_codec:parameters(Params),
-			m3ua_codec:fetch_parameter(?ErrorCode, Parameters)
+			m3ua_codec:m3ua(Data)
 	after
 		1000 ->
 			nothing_sent
