@@ -1161,36 +1161,26 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP, params = Params},
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
+%% RFC4666, Section-4.3.4.1: an ASP UP at an asp already inactive is
+%% acknowledged "and no further action is taken". It is most often the
+%% same ASP UP sent again when T(ack) ran out before the first ACK came.
 handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP},
 		inactive, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
-	?LOG_NOTICE("ASPUP received in the inactive state",
+	?LOG_DEBUG("ASPUP acknowledged again",
 			#{layer => m3ua, ep => EP, assoc => Assoc,
-			reason => unexpected_message}),
+			reason => already_inactive}),
 	AspUpAck = #m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK},
 	Packet = m3ua_codec:m3ua(AspUpAck),
 	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
-			P0 = m3ua_codec:add_parameter(?ErrorCode, unexpected_message, []),
-			EParams = m3ua_codec:parameters(P0),
-			ErrorMsg = #m3ua{class = ?MGMTMessage,
-					type = ?MGMTError, params = EParams},
-			Packet2 = m3ua_codec:m3ua(ErrorMsg),
-			case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet2) of
-				ok ->
-					ok = m3ua_receiver:replenish(Receiver, Active),
-					UpIn = maps:get(up_in, Count, 0),
-					UpAckOut = maps:get(up_ack_out, Count, 0),
-					NewCount = maps:put(up_in, UpIn + 1, Count),
-					NextCount = maps:put(up_ack_out, UpAckOut + 1, NewCount),
-					NewStateData = StateData#statedata{count = NextCount},
-					{next_state, inactive, NewStateData};
-				{error, eagain} ->
-					% @todo flow control
-					{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
-				{error, Reason} ->
-					{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
-			end;
+			ok = m3ua_receiver:replenish(Receiver, Active),
+			UpIn = maps:get(up_in, Count, 0),
+			UpAckOut = maps:get(up_ack_out, Count, 0),
+			NewCount = maps:put(up_in, UpIn + 1, Count),
+			NextCount = maps:put(up_ack_out, UpAckOut + 1, NewCount),
+			NewStateData = StateData#statedata{count = NextCount},
+			{next_state, inactive, NewStateData};
 		{error, eagain} ->
 			% @todo flow control
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};

@@ -102,7 +102,7 @@ all() ->
 			endpoint_gives_up, lm_restart, callback_raised,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
-			sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
+			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
 			sgp_deregister_local, asp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
@@ -427,6 +427,27 @@ sgp_unexpected(_Config) ->
 			16:32, ?AffectedPointCode:16, 8:16, 0, 1:24>>),
 	[Assoc] = m3ua:get_assoc(EP),
 	{ok, #{unexpected_in := 4, error_out := 4}} = m3ua:getcount(EP, Assoc),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+sgp_asp_up_inactive() ->
+	[{userdata, [{doc, "An ASP UP at an inactive asp is acknowledged and nothing more (RFC 4666 4.3.4.1)."}]}].
+
+sgp_asp_up_inactive(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_asp(),
+	AspUp = raw_msg(?ASPSMMessage, ?ASPSMASPUP),
+	ok = raw_put(Peer, PeerAssoc, AspUp),
+	#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK} = raw_get(Peer),
+	inactive = m3ua:asp_status(EP, Assoc),
+	%% Again, as an ASP whose T(ack) ran out would send it: the same ACK,
+	%% and no ERR after it.
+	ok = raw_put(Peer, PeerAssoc, AspUp),
+	#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK} = raw_get(Peer),
+	nothing_sent = raw_get(Peer),
+	inactive = m3ua:asp_status(EP, Assoc),
+	{ok, Counts} = m3ua:getcount(EP, Assoc),
+	#{up_in := 2, up_ack_out := 2} = Counts,
+	false = maps:is_key(error_out, Counts),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 
