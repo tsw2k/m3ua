@@ -329,7 +329,7 @@ handle_call({'M-SCTP_RELEASE', request, EndPoint, Assoc},
 		{value, Fsm} ->
 			try
 				Ref = make_ref(),
-				gen_fsm:send_all_state_event(Fsm, {'M-SCTP_RELEASE', request, Ref, self()}),
+				gen_statem:cast(Fsm, {'M-SCTP_RELEASE', request, Ref, self()}),
 				NewReqs = gb_trees:insert(Ref, From, Reqs),
 				NewState = State#state{reqs = NewReqs},
 				{noreply, NewState}
@@ -346,7 +346,7 @@ handle_call({'M-SCTP_STATUS', request, EndPoint, Assoc},
 		{value, Fsm} ->
 			try
 				Ref = make_ref(),
-				gen_fsm:send_all_state_event(Fsm, {'M-SCTP_STATUS', request, Ref, self()}),
+				gen_statem:cast(Fsm, {'M-SCTP_STATUS', request, Ref, self()}),
 				NewReqs = gb_trees:insert(Ref, From, Reqs),
 				NewState = State#state{reqs = NewReqs},
 				{noreply, NewState}
@@ -362,7 +362,7 @@ handle_call({'M-ASP_STATUS', request,  EndPoint, Assoc},
 	case gb_trees:lookup({EndPoint, Assoc}, Fsms) of
 		{value, Fsm} ->
 			Ref = make_ref(),
-			gen_fsm:send_all_state_event(Fsm, {'M-ASP_STATUS', request, Ref, self()}),
+			gen_statem:cast(Fsm, {'M-ASP_STATUS', request, Ref, self()}),
 			NewReqs = gb_trees:insert(Ref, From, Reqs),
 			NewState = State#state{reqs = NewReqs},
 			{noreply, NewState};
@@ -399,7 +399,7 @@ handle_call({'M-RK_REG', request, EndPoint, Assoc,
 	case gb_trees:lookup({EndPoint, Assoc}, Fsms) of
 		{value, Fsm} ->
 			Ref = make_ref(),
-			gen_fsm:send_event(Fsm, {'M-RK_REG', request,
+			gen_statem:cast(Fsm, {'M-RK_REG', request,
 					Ref, self(), RC, NA, Keys, Mode, AsName}),
 			NewReqs = gb_trees:insert(Ref, From, Reqs),
 			NewState = State#state{reqs = NewReqs},
@@ -412,7 +412,7 @@ handle_call({'M-RK_DEREG', request, EndPoint, Assoc, RC}, From,
 	case gb_trees:lookup({EndPoint, Assoc}, Fsms) of
 		{value, Fsm} ->
 			Ref = make_ref(),
-			gen_fsm:send_event(Fsm, {'M-RK_DEREG', request, Ref, self(), RC}),
+			gen_statem:cast(Fsm, {'M-RK_DEREG', request, Ref, self(), RC}),
 			NewReqs = gb_trees:insert(Ref, From, Reqs),
 			NewState = State#state{reqs = NewReqs},
 			{noreply, NewState};
@@ -426,7 +426,7 @@ handle_call({AspOp, request, EndPoint, Assoc}, From,
 	case gb_trees:lookup({EndPoint, Assoc}, Fsms) of
 		{value, AspFsm} ->
 			Ref = make_ref(),
-			gen_fsm:send_event(AspFsm, {AspOp, request, Ref, self()}),
+			gen_statem:cast(AspFsm, {AspOp, request, Ref, self()}),
 			NewReqs = gb_trees:insert(Ref, From, Reqs),
 			NewState = State#state{reqs = NewReqs},
 			{noreply, NewState};
@@ -438,7 +438,7 @@ handle_call({getstat, EndPoint, Assoc, Options}, _From,
 	case gb_trees:lookup({EndPoint, Assoc}, Fsms) of
 		{value, Fsm} ->
 			Event = {getstat, Options},
-			case catch gen_fsm:sync_send_all_state_event(Fsm, Event) of
+			case catch gen_statem:call(Fsm, Event, 5000) of
 				{'EXIT', Reason} ->
 					{reply, {error, Reason}, State};
 				Reply ->
@@ -451,7 +451,7 @@ handle_call({getcount, EndPoint, Assoc}, _From,
 		#state{fsms = Fsms} = State) ->
 	case gb_trees:lookup({EndPoint, Assoc}, Fsms) of
 		{value, Fsm} ->
-			case catch gen_fsm:sync_send_all_state_event(Fsm, getcount) of
+			case catch gen_statem:call(Fsm, getcount, 5000) of
 				{'EXIT', Reason} ->
 					{reply, {error, Reason}, State};
 				Reply ->
@@ -764,7 +764,7 @@ adopt(#state{ep_sup_sup = EPSupSup, eps = EPs} = State) ->
 			({Mod, FsmSup, _, _}, {EPs1, N}) when is_pid(FsmSup),
 					(Mod == m3ua_asp_sup orelse Mod == m3ua_sgp_sup) ->
 				Fsms = [Fsm || {_, Fsm, _, _} <- Children(FsmSup), is_pid(Fsm)],
-				[gen_fsm:send_all_state_event(Fsm, 'M-LM_ADOPT') || Fsm <- Fsms],
+				[gen_statem:cast(Fsm, 'M-LM_ADOPT') || Fsm <- Fsms],
 				{EPs1, N + length(Fsms)};
 			(_, Acc) ->
 				Acc

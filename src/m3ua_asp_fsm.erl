@@ -14,7 +14,7 @@
 %%% See the License for the specific language governing permissions and
 %%% limitations under the License.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%% @doc This {@link //stdlib/gen_fsm. gen_fsm} behaviour callback module
+%%% @doc This {@link //stdlib/gen_statem. gen_statem} behaviour callback module
 %%% 	implements a communicating finite state machine within the
 %%% 	{@link //m3ua. m3ua} application handling an SCTP association
 %%%   for an Application Server Process (ASP).
@@ -259,14 +259,13 @@
 -module(m3ua_asp_fsm).
 -copyright('Copyright (c) 2015-2025 SigScale Global Inc.').
 
--behaviour(gen_fsm).
+-behaviour(gen_statem).
 
-%% export the callbacks needed for gen_fsm behaviour
--export([init/1, handle_event/3, handle_sync_event/4, handle_info/3,
-			terminate/3, code_change/4]).
+%% export the callbacks needed for gen_statem behaviour
+-export([init/1, callback_mode/0, terminate/3, code_change/4]).
 
-%% export the gen_fsm state callbacks
--export([down/2, down/3, inactive/2, inactive/3, active/2, active/3]).
+%% export the gen_statem state callbacks
+-export([down/3, inactive/3, active/3]).
 
 -include("m3ua.hrl").
 -include_lib("kernel/include/inet_sctp.hrl").
@@ -455,16 +454,26 @@
 -optional_callbacks([unavailable_user/6, deregister/5]).
 
 %%----------------------------------------------------------------------
-%%  The m3ua_asp_fsm gen_fsm callbacks
+%%  The m3ua_asp_fsm gen_statem callbacks
 %%----------------------------------------------------------------------
+
+-spec callback_mode() -> Result
+	when
+		Result :: gen_statem:callback_mode_result().
+%% @doc Set the callback mode of the callback module.
+%% @see //stdlib/gen_statem:callback_mode/0
+%% @private
+%%
+callback_mode() ->
+	[state_functions].
 
 -spec init(Args :: [term()]) ->
 	{ok, StateName :: atom(), StateData :: #statedata{}}
-			| {ok, StateName :: atom(),
-					StateData :: #statedata{}, timeout() | hibernate}
+			| {ok, StateName :: atom(), StateData :: #statedata{},
+					Actions :: [gen_statem:action()] | gen_statem:action()}
 			| {stop, Reason :: term()} | ignore.
 %% @doc Initialize the {@module} finite state machine.
-%% @see //stdlib/gen_fsm:init/1
+%% @see //stdlib/gen_statem:init/1
 %% @private
 %%
 init([Socket, Address, Port,
@@ -484,43 +493,40 @@ init([Socket, Address, Port,
 					static = Static, use_rc = UseRC},
 			report_discarding(Cb, EP, Assoc),
 			report_carrying(undefined, down, EP, Assoc),
-			{ok, down, Statedata, 0};
+			{ok, down, Statedata, {timeout, 0, timeout}};
 		{error, Reason} ->
 			m3ua_sctp:close(Socket),
 			{stop, Reason}
 	end.
 
--spec down(Event :: timeout | term(), StateData :: #statedata{}) ->
-	{next_state, NextStateName :: atom(), NewStateData :: #statedata{}}
-			| {next_state, NextStateName :: atom(),
-						NewStateData :: #statedata{}, timeout() | hibernate}
-			| {stop, Reason :: term(), NewStateData :: #statedata{}}.
-%% @doc Handle events sent with {@link //stdlib/gen_fsm:send_event/2.
-%% 	gen_fsm:send_event/2} in the <b>down</b> state.
+-spec down(EventType :: gen_statem:event_type(),
+		EventContent :: term(), StateData :: #statedata{}) ->
+	Result :: gen_statem:event_handler_result(atom()).
+%% @doc Handle events received in the <b>down</b> state.
 %% @private
 %%
-down(timeout, #statedata{req = {'M-ASP_UP', Ref, From}} = StateData) ->
+down(timeout, _EventContent, #statedata{req = {'M-ASP_UP', Ref, From}} = StateData) ->
 	gen_server:cast(From, {'M-ASP_UP', confirm, Ref, {error, timeout}}),
 	NewStateData = StateData#statedata{req = undefined},
 	{next_state, down, NewStateData};
 %% An ASP DOWN ACK takes the asp down with any other request still
 %% outstanding, and that request's timer still runs.
-down(timeout, #statedata{req = {RkOp, Ref, From, _}} = StateData)
+down(timeout, _EventContent, #statedata{req = {RkOp, Ref, From, _}} = StateData)
 		when RkOp == 'M-RK_REG'; RkOp == 'M-RK_DEREG' ->
 	gen_server:cast(From, {RkOp, confirm, Ref, {error, timeout}}),
 	NewStateData = StateData#statedata{req = undefined},
 	{next_state, down, NewStateData};
-down(timeout, #statedata{req = {AspOp, Ref, From}} = StateData)
+down(timeout, _EventContent, #statedata{req = {AspOp, Ref, From}} = StateData)
 		when AspOp == 'M-ASP_ACTIVE'; AspOp == 'M-ASP_INACTIVE' ->
 	gen_server:cast(From, {AspOp, confirm, Ref, {error, timeout}}),
 	NewStateData = StateData#statedata{req = undefined},
 	{next_state, down, NewStateData};
-down(timeout, #statedata{ep = EP, assoc = Assoc, receiver = undefined,
+down(timeout, _EventContent, #statedata{ep = EP, assoc = Assoc, receiver = undefined,
 		socket = Socket, active = Active,
 		callback = CbMod, cb_state = CbState} = StateData) ->
 	gen_server:cast(m3ua, {'M-SCTP_ESTABLISH', indication, self(), EP, Assoc}),
 	%% Reading starts here and not in init/1. This state is reached by
-	%% the zero timeout that init/1 asks for, and gen_fsm cancels a
+	%% the zero timeout that init/1 asks for, and gen_statem cancels a
 	%% timeout the moment any message arrives -- so a receiver started
 	%% in init/1 races the registration above and can win it. It did:
 	%% the association came up, carried traffic, and was unknown to
@@ -531,9 +537,9 @@ down(timeout, #statedata{ep = EP, assoc = Assoc, receiver = undefined,
 	{ok, NewCbState} = m3ua_callback:cb(asp_down, CbMod, [CbState]),
 	{next_state, down, StateData#statedata{cb_state = NewCbState,
 			receiver = Receiver, lm = whereis(m3ua)}};
-down({'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
+down(cast, {'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
 	handle_dereg(Event, down, StateData);
-down({'M-ASP_UP', request, Ref, From},
+down(cast, {'M-ASP_UP', request, Ref, From},
 		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
 	AspUp = #m3ua{class = ?ASPSMMessage,
@@ -553,65 +559,56 @@ down({'M-ASP_UP', request, Ref, From},
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
-down({'MTP-TRANSFER', request, _Ref, _From, _Params},
+down(cast, {'MTP-TRANSFER', request, _Ref, _From, _Params},
 		#statedata{ep = EP, assoc = Assoc, count = Count} = StateData) ->
 	?LOG_NOTICE("MTP-TRANSFER discarded",
 			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_down}),
 	Discarded = maps:get(transfer_discarded, Count, 0),
 	NewCount = maps:put(transfer_discarded, Discarded + 1, Count),
 	{next_state, down, StateData#statedata{count = NewCount}};
-down({AspOp, request, Ref, From},
+down(cast, {AspOp, request, Ref, From},
 		#statedata{ep = EP, assoc = Assoc, req = Req} = StateData)
-		when Req /= undefined ->
+		when Req /= undefined, (AspOp == 'M-ASP_UP'
+		orelse AspOp == 'M-ASP_DOWN' orelse AspOp == 'M-ASP_ACTIVE'
+		orelse AspOp == 'M-ASP_INACTIVE') ->
 	?LOG_NOTICE("ASP state request refused",
 			#{layer => m3ua, ep => EP, assoc => Assoc,
 			op => AspOp, reason => asp_busy}),
 	gen_server:cast(From, {AspOp, confirm, Ref, {error, asp_busy}}),
-	{next_state, down, StateData}.
-
--spec down(Event :: timeout | term(),
-		From :: {pid(), Tag :: term()}, StateData :: #statedata{}) ->
-		{reply, Reply :: term(),
-				NextStateName :: atom(), NewStateData :: #statedata{}}
-		| {stop, Reason :: term(), Reply :: term(), NewStateData :: #statedata{}}.
-%% @doc Handle an event sent with {@link //stdlib/gen_fsm:sync_send_event/2.
-%% 	gen_fsm:sync_send_event/2,3} in the <b>down</b> state.
-%% @private
-%%
-down({'MTP-TRANSFER', request, _Params}, _From,
+	{next_state, down, StateData};
+down({call, From}, {'MTP-TRANSFER', request, _Params},
 		#statedata{ep = EP, assoc = Assoc, count = Count} = StateData) ->
 	?LOG_NOTICE("MTP-TRANSFER refused",
 			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_down}),
 	Discarded = maps:get(transfer_discarded, Count, 0),
 	NewCount = maps:put(transfer_discarded, Discarded + 1, Count),
-	{reply, {error, unexpected_message}, down,
-			StateData#statedata{count = NewCount}}.
+	{next_state, down, StateData#statedata{count = NewCount},
+			{reply, From, {error, unexpected_message}}};
+down(EventType, EventContent, StateData) ->
+	handle_event(EventType, EventContent, down, StateData).
 
--spec inactive(Event :: timeout | term(), StateData :: #statedata{}) ->
-	{next_state, NextStateName :: atom(), NewStateData :: #statedata{}}
-			| {next_state, NextStateName :: atom(), NewStateData :: #statedata{},
-				timeout() | hibernate}
-			| {stop, Reason :: term(), NewStateData :: #statedata{}}.
-%% @doc Handle events sent with {@link //stdlib/gen_fsm:send_event/2.
-%% 	gen_fsm:send_event/2} in the <b>inactive</b> state.
+-spec inactive(EventType :: gen_statem:event_type(),
+		EventContent :: term(), StateData :: #statedata{}) ->
+	Result :: gen_statem:event_handler_result(atom()).
+%% @doc Handle events received in the <b>inactive</b> state.
 %% @private
 %%
-inactive(timeout, #statedata{req = {RkOp, Ref, From, _}} = StateData)
+inactive(timeout, _EventContent, #statedata{req = {RkOp, Ref, From, _}} = StateData)
 		when RkOp == 'M-RK_REG'; RkOp == 'M-RK_DEREG' ->
 	gen_server:cast(From, {RkOp, confirm, Ref, {error, timeout}}),
 	NewStateData = StateData#statedata{req = undefined},
 	{next_state, inactive, NewStateData};
-inactive(timeout, #statedata{req = {AspOp, Ref, From}} = StateData)
+inactive(timeout, _EventContent, #statedata{req = {AspOp, Ref, From}} = StateData)
 		when AspOp == 'M-ASP_ACTIVE'; AspOp == 'M-ASP_DOWN' ->
 	gen_server:cast(From, {AspOp, confirm, Ref, {error, timeout}}),
 	NewStateData = StateData#statedata{req = undefined},
 	{next_state, down, NewStateData};
-inactive({'M-RK_REG', request, _, _, _, _, _, _, _} = Event,
+inactive(cast, {'M-RK_REG', request, _, _, _, _, _, _, _} = Event,
 		#statedata{req = undefined} = StateData) ->
 	handle_reg(Event, inactive, StateData);
-inactive({'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
+inactive(cast, {'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
 	handle_dereg(Event, inactive, StateData);
-inactive({'M-ASP_ACTIVE', request, Ref, From},
+inactive(cast, {'M-ASP_ACTIVE', request, Ref, From},
 		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
 	AspActive = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC},
@@ -630,7 +627,7 @@ inactive({'M-ASP_ACTIVE', request, Ref, From},
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
-inactive({'M-ASP_DOWN', request, Ref, From},
+inactive(cast, {'M-ASP_DOWN', request, Ref, From},
 		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
 	AspDown = #m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN},
@@ -649,62 +646,53 @@ inactive({'M-ASP_DOWN', request, Ref, From},
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
-inactive({'MTP-TRANSFER', request, _Ref, _From, _Params},
+inactive(cast, {'MTP-TRANSFER', request, _Ref, _From, _Params},
 		#statedata{ep = EP, assoc = Assoc, count = Count} = StateData) ->
 	?LOG_NOTICE("MTP-TRANSFER discarded",
 			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_inactive}),
 	Discarded = maps:get(transfer_discarded, Count, 0),
 	NewCount = maps:put(transfer_discarded, Discarded + 1, Count),
 	{next_state, inactive, StateData#statedata{count = NewCount}};
-inactive({AspOp, request, Ref, From},
+inactive(cast, {AspOp, request, Ref, From},
 		#statedata{ep = EP, assoc = Assoc, req = Req} = StateData)
-		when Req /= undefined ->
+		when Req /= undefined, (AspOp == 'M-ASP_UP'
+		orelse AspOp == 'M-ASP_DOWN' orelse AspOp == 'M-ASP_ACTIVE'
+		orelse AspOp == 'M-ASP_INACTIVE') ->
 	?LOG_NOTICE("ASP state request refused",
 			#{layer => m3ua, ep => EP, assoc => Assoc,
 			op => AspOp, reason => asp_busy}),
 	gen_server:cast(From, {AspOp, confirm, Ref, {error, asp_busy}}),
-	{next_state, inactive, StateData}.
-
--spec inactive(Event :: timeout | term(),
-		From :: {pid(), Tag :: term()}, StateData :: #statedata{}) ->
-		{reply, Reply :: term(), NextStateName :: atom(),
-				NewStateData :: #statedata{}}
-		| {stop, Reason :: term(), Reply :: term(), NewStateData :: #statedata{}}.
-%% @doc Handle an event sent with {@link //stdlib/gen_fsm:sync_send_event/2.
-%% 	gen_fsm:sync_send_event/2,3} in the <b>inactive</b> state.
-%% @private
-%%
-inactive({'MTP-TRANSFER', request, _Params}, _From,
+	{next_state, inactive, StateData};
+inactive({call, From}, {'MTP-TRANSFER', request, _Params},
 		#statedata{ep = EP, assoc = Assoc, count = Count} = StateData) ->
 	?LOG_NOTICE("MTP-TRANSFER refused",
 			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_inactive}),
 	Discarded = maps:get(transfer_discarded, Count, 0),
 	NewCount = maps:put(transfer_discarded, Discarded + 1, Count),
-	{reply, {error, unexpected_message}, down,
-			StateData#statedata{count = NewCount}}.
+	{next_state, down, StateData#statedata{count = NewCount},
+			{reply, From, {error, unexpected_message}}};
+inactive(EventType, EventContent, StateData) ->
+	handle_event(EventType, EventContent, inactive, StateData).
 
--spec active(Event :: timeout | term(), StateData :: #statedata{}) ->
-	{next_state, NextStateName :: atom(), NewStateData :: #statedata{}}
-			| {next_state, NextStateName :: atom(),
-					NewStateData :: #statedata{}, timeout() | hibernate}
-			| {stop, Reason :: term(), NewStateData :: #statedata{}}.
-%% @doc Handle events sent with {@link //stdlib/gen_fsm:send_event/2.
-%% 	gen_fsm:send_event/2} in the <b>active</b> state.
+-spec active(EventType :: gen_statem:event_type(),
+		EventContent :: term(), StateData :: #statedata{}) ->
+	Result :: gen_statem:event_handler_result(atom()).
+%% @doc Handle events received in the <b>active</b> state.
 %% @private
 %%
-active(timeout, #statedata{req = {RkOp, Ref, From, _}} = StateData)
+active(timeout, _EventContent, #statedata{req = {RkOp, Ref, From, _}} = StateData)
 		when RkOp == 'M-RK_REG'; RkOp == 'M-RK_DEREG' ->
 	gen_server:cast(From, {RkOp, confirm, Ref, {error, timeout}}),
 	NewStateData = StateData#statedata{req = undefined},
 	{next_state, active, NewStateData};
-active(timeout, #statedata{req = {AspOp, Ref, From},
+active(timeout, _EventContent, #statedata{req = {AspOp, Ref, From},
 		ep = EP, assoc = Assoc} = StateData)
 		when AspOp == 'M-ASP_INACTIVE'; AspOp == 'M-ASP_DOWN' ->
 	gen_server:cast(From, {AspOp, confirm, Ref, {error, timeout}}),
 	NewStateData = StateData#statedata{req = undefined},
 	report_carrying(active, down, EP, Assoc),
 	{next_state, down, NewStateData};
-active({'MTP-TRANSFER', request, Ref, From,
+active(cast, {'MTP-TRANSFER', request, Ref, From,
 		{Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
 		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, socket = Socket, assoc = Assoc,
 		ep = EP, out_streams = NumStreams,
@@ -753,7 +741,7 @@ active({'MTP-TRANSFER', request, Ref, From,
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
-active({'M-ASP_INACTIVE', request, Ref, From},
+active(cast, {'M-ASP_INACTIVE', request, Ref, From},
 		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
 	AspInActive = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIA},
@@ -772,7 +760,7 @@ active({'M-ASP_INACTIVE', request, Ref, From},
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
-active({'M-ASP_DOWN', request, Ref, From},
+active(cast, {'M-ASP_DOWN', request, Ref, From},
 		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
 	AspDown = #m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN},
@@ -791,31 +779,24 @@ active({'M-ASP_DOWN', request, Ref, From},
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
-active({'M-RK_REG', request, _, _, _, _, _, _, _} = Event,
+active(cast, {'M-RK_REG', request, _, _, _, _, _, _, _} = Event,
 		#statedata{req = undefined} = StateData) ->
 	handle_reg(Event, active, StateData);
-active({'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
+active(cast, {'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
 	handle_dereg(Event, active, StateData);
-active({AspOp, request, Ref, From},
+active(cast, {AspOp, request, Ref, From},
 		#statedata{ep = EP, assoc = Assoc, req = Req} = StateData)
-		when Req /= undefined ->
+		when Req /= undefined, (AspOp == 'M-ASP_UP'
+		orelse AspOp == 'M-ASP_DOWN' orelse AspOp == 'M-ASP_ACTIVE'
+		orelse AspOp == 'M-ASP_INACTIVE') ->
 	?LOG_NOTICE("ASP state request refused",
 			#{layer => m3ua, ep => EP, assoc => Assoc,
 			op => AspOp, reason => asp_busy}),
 	gen_server:cast(From, {AspOp, confirm, Ref, {error, asp_busy}}),
-	{next_state, active, StateData}.
-
--spec active(Event :: timeout | term(),
-		From :: {pid(), Tag :: term()}, StateData :: #statedata{}) ->
-		{reply, Reply :: term(),
-				NextStateName :: atom(), NewStateData :: #statedata{}}
-		| {stop, Reason :: term(), Reply :: term(), NewStateData :: #statedata{}}.
-%% @doc Handle an event sent with {@link //stdlib/gen_fsm:sync_send_event/2.
-%% 	gen_fsm:sync_send_event/2,3} in the <b>active</b> state.
-%% @private
-%%
-active({'MTP-TRANSFER', request, {Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
-		{From, Ref}, #statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, socket = Socket, assoc = Assoc,
+	{next_state, active, StateData};
+active({call, {From, Ref} = Caller},
+		{'MTP-TRANSFER', request, {Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
+		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, socket = Socket, assoc = Assoc,
 		ep = EP, out_streams = NumStreams,
 		rks = RKs, use_rc = UseRC, callback = CbMod,
 		cb_state = CbState, count = Count} = StateData) ->
@@ -850,7 +831,7 @@ active({'MTP-TRANSFER', request, {Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
 					TransferOut = maps:get(transfer_out, Count1, 0),
 					NewCount = maps:put(transfer_out, TransferOut + 1, Count1),
 					NextStateData = NewStateData#statedata{count = NewCount},
-					{reply, ok, active, NextStateData};
+					{next_state, active, NextStateData, {reply, Caller, ok}};
 				{{error, Reason}, _} ->
 					{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 			end;
@@ -859,44 +840,40 @@ active({'MTP-TRANSFER', request, {Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
-	end.
+	end;
+active(EventType, EventContent, StateData) ->
+	handle_event(EventType, EventContent, active, StateData).
 
--spec handle_event(Event :: term(), StateName :: atom(),
+-spec handle_event(EventType :: gen_statem:event_type(),
+		EventContent :: term(), StateName :: atom(),
 		StateData :: #statedata{}) ->
-	{next_state, NextStateName :: atom(), NewStateData :: #statedata{}}
-			| {next_state, NextStateName :: atom(), NewStateData :: #statedata{},
-				timeout() | hibernate}
-			| {stop, Reason :: term(), NewStateData :: #statedata{}}.
-%% @doc Handle an event sent with
-%% 	{@link //stdlib/gen_fsm:send_all_state_event/2.
-%% 	gen_fsm:send_all_state_event/2}.
-%% @see //stdlib/gen_fsm:handle_event/3
-%% @private
-%%
-handle_event('M-LM_ADOPT', StateName,
+	Result :: gen_statem:event_handler_result(atom()).
+%% @doc Handle events common to all states.
+%% @hidden
+handle_event(cast, 'M-LM_ADOPT', StateName,
 		#statedata{receiver = undefined} = StateData) ->
 	%% Not announced yet: down(timeout, ...) will do it, and this event
 	%% has just cancelled the zero timeout that gets there.
-	{next_state, StateName, StateData, 0};
-handle_event('M-LM_ADOPT', StateName,
+	{next_state, StateName, StateData, {timeout, 0, timeout}};
+handle_event(cast, 'M-LM_ADOPT', StateName,
 		#statedata{ep = EP, assoc = Assoc} = StateData) ->
 	%% A new layer manager, finding this association running; see
 	%% m3ua_lm_server:adopt/1.
 	gen_server:cast(m3ua, {'M-SCTP_ESTABLISH', indication, self(), EP, Assoc}),
 	{next_state, StateName, StateData#statedata{lm = whereis(m3ua)}};
-handle_event({'M-SCTP_RELEASE', request, Ref, From}, _StateName,
+handle_event(cast, {'M-SCTP_RELEASE', request, Ref, From}, _StateName,
 		#statedata{ep = EP, assoc = Assoc, socket = Socket} = StateData)
 		when Socket /= undefined ->
 	gen_server:cast(From,
 			{'M-SCTP_RELEASE', confirm, Ref, m3ua_sctp:close(Socket)}),
 	NewStateData = StateData#statedata{socket = undefined},
 	{stop, {shutdown, {{EP, Assoc}, shutdown}}, NewStateData};
-handle_event({'M-SCTP_STATUS', request, Ref, From}, StateName,
+handle_event(cast, {'M-SCTP_STATUS', request, Ref, From}, StateName,
 		#statedata{socket = undefined, assoc = _Assoc} = StateData) ->
 	gen_server:cast(From,
 			{'M-SCTP_STATUS', confirm, Ref, {error, enotsock}}),
 	{next_state, StateName, StateData};
-handle_event({'M-SCTP_STATUS', request, Ref, From}, StateName,
+handle_event(cast, {'M-SCTP_STATUS', request, Ref, From}, StateName,
 		#statedata{socket = Socket, assoc = Assoc} = StateData) ->
 	case m3ua_sctp:status(Socket, Assoc) of
 		{ok, Status} ->
@@ -908,7 +885,7 @@ handle_event({'M-SCTP_STATUS', request, Ref, From}, StateName,
 					{'M-SCTP_STATUS', confirm, Ref, {error, Reason}}),
 			{next_state, StateName, StateData}
 	end;
-handle_event({'M-SSNM', Type, Params}, StateName,
+handle_event(cast, {'M-SSNM', Type, Params}, StateName,
 		#statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active, ep = EP,
 		assoc = Assoc, count = Count} = StateData) ->
 	Message = #m3ua{class = ?SSNMMessage, type = Type, params = Params},
@@ -926,73 +903,45 @@ handle_event({'M-SSNM', Type, Params}, StateName,
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
-handle_event({'M-ASP_STATUS', request, Ref, From}, StateName, StateData) ->
+handle_event(cast, {'M-ASP_STATUS', request, Ref, From}, StateName, StateData) ->
 	gen_server:cast(From, {'M-ASP_STATUS', confirm, Ref, StateName}),
-	{next_state, StateName, StateData}.
-
--spec handle_sync_event(Event :: term(), From :: {pid(), Tag :: term()},
-		StateName :: atom(), StateData :: #statedata{}) ->
-	{reply, Reply :: term(), NextStateName :: atom(), NewStateData :: term()}
-			| {reply, Reply :: term(), NextStateName :: atom(),
-					NewStateData :: #statedata{}, timeout() | hibernate}
-			| {next_state, NextStateName :: atom(), NewStateData :: #statedata{}}
-			| {next_state, NextStateName :: atom(), NewStateData :: #statedata{},
-				timeout() | hibernate}
-			| {stop, Reason :: term(), Reply :: term(),
-				NewStateData :: #statedata{}}
-			| {stop, Reason :: term(), NewStateData :: #statedata{}}.
-%% @doc Handle an event sent with
-%% 	{@link //stdlib/gen_fsm:sync_send_all_state_event/2.
-%% 	gen_fsm:sync_send_all_state_event/2,3}.
-%% @see //stdlib/gen_fsm:handle_sync_event/4
-%% @private
-%%
-handle_sync_event(getassoc, _From, StateName,
+	{next_state, StateName, StateData};
+handle_event({call, From}, getassoc, StateName,
 		#statedata{assoc = Assoc} = StateData) ->
-	{reply, Assoc, StateName, StateData};
-handle_sync_event({getstat, undefined}, _From, StateName,
+	{next_state, StateName, StateData, {reply, From, Assoc}};
+handle_event({call, From}, {getstat, undefined}, StateName,
 		#statedata{socket = Socket} = StateData) ->
-	{reply, m3ua_sctp:getstat(Socket), StateName, StateData};
-handle_sync_event({getstat, Options}, _From, StateName,
+	{next_state, StateName, StateData, {reply, From, m3ua_sctp:getstat(Socket)}};
+handle_event({call, From}, {getstat, Options}, StateName,
 		#statedata{socket = Socket} = StateData) ->
-	{reply, m3ua_sctp:getstat(Socket, Options), StateName, StateData};
-handle_sync_event(getcount, _From, StateName,
+	{next_state, StateName, StateData, {reply, From, m3ua_sctp:getstat(Socket, Options)}};
+handle_event({call, From}, getcount, StateName,
 		#statedata{count = Counters} = StateData) ->
-	{reply, Counters, StateName, StateData}.
-
--spec handle_info(Info :: term(), StateName :: atom(),
-		StateData :: #statedata{}) ->
-	{next_state, NextStateName :: atom(), NewStateData :: #statedata{}}
-			| {next_state, NextStateName :: atom(),
-				NewStateData :: #statedata{}, timeout() | hibernate}
-			| {stop, Reason :: normal | term(), NewStateData :: #statedata{}}.
-%% @doc Handle a received message.
-%% @see //stdlib/gen_fsm:handle_info/3
-%% @private
-%%
-handle_info({timeout, Timer, tack}, StateName,
+	{next_state, StateName, StateData, {reply, From, Counters}};
+handle_event(info, {timeout, Timer, tack}, StateName,
 		#statedata{timer = Timer, req = Req} = StateData)
 		when Req /= undefined ->
-	?MODULE:StateName(timeout, StateData#statedata{timer = undefined});
-handle_info({timeout, _Timer, tack}, StateName, StateData) ->
+	?MODULE:StateName(timeout, tack,
+			StateData#statedata{timer = undefined});
+handle_event(info, {timeout, _Timer, tack}, StateName, StateData) ->
 	{next_state, StateName, StateData};
-handle_info({sctp, Socket, _PeerAddr, _PeerPort,
+handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort,
 		{[#sctp_sndrcvinfo{stream = Stream}], Data}},
 		StateName, #statedata{socket = Socket} = StateData)
 		when is_binary(Data) ->
 	handle_asp(Data, StateName, Stream, StateData);
-handle_info({sctp, Socket, _PeerAddr, _PeerPort,
+handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort,
 		{[], #sctp_assoc_change{state = comm_lost, assoc_id = Assoc}}}, _,
 		#statedata{socket = Socket, ep = EP, assoc = Assoc} = StateData) ->
 	{stop, {shutdown, {{EP, Assoc}, comm_lost}}, StateData};
-handle_info({sctp, Socket, _PeerAddr, _PeerPort,
+handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort,
 		{[], #sctp_adaptation_event{adaptation_ind = UAL, assoc_id = Assoc}}},
 		StateName, #statedata{socket = Socket, receiver = Receiver, active = Active,
 		assoc = Assoc} = StateData) ->
 	ok = m3ua_receiver:replenish(Receiver, Active),
 	{next_state, StateName, StateData#statedata{ual = UAL}};
 % @todo Track peer address states.
-handle_info({sctp, Socket, _, _,
+handle_event(info, {sctp, Socket, _, _,
 		{[], #sctp_paddr_change{addr = {PeerAddr, PeerPort},
 		state = addr_confirmed, assoc_id = Assoc}}}, StateName,
 		#statedata{socket = Socket, receiver = Receiver, active = Active,
@@ -1001,15 +950,15 @@ handle_info({sctp, Socket, _, _,
 	NewStateData = StateData#statedata{peer_addr = PeerAddr,
 			peer_port = PeerPort},
 	{next_state, StateName, NewStateData};
-handle_info({sctp, Socket, _, _,
+handle_event(info, {sctp, Socket, _, _,
 		{[], #sctp_paddr_change{state = addr_unreachable}}}, _StateName,
 		#statedata{socket = Socket, ep = EP, assoc = Assoc} = StateData) ->
 	{stop, {shutdown, {{EP, Assoc}, addr_unreachable}}, StateData};
-handle_info({sctp, Socket, _PeerAddr, _PeerPort,
+handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort,
 		{[], #sctp_shutdown_event{assoc_id = Assoc}}}, _StateName,
 		#statedata{socket = Socket, ep = EP, assoc = Assoc} = StateData) ->
 	{stop, {shutdown, {{EP, Assoc}, shutdown}}, StateData};
-handle_info({sctp_error, Socket, PeerAddr, PeerPort,
+handle_event(info, {sctp_error, Socket, PeerAddr, PeerPort,
 		{[], #sctp_send_failed{flags = Flags, error = Error,
 		info = Info, assoc_id = Assoc, data = Data}}},
 		_StateName, #statedata{ep = EP} = StateData) ->
@@ -1021,22 +970,22 @@ handle_info({sctp_error, Socket, PeerAddr, PeerPort,
 			#{layer => m3ua, ep => EP, assoc => Assoc, socket => Socket,
 			info => Info, data => Data}),
 	{stop, {shutdown, {{EP, Assoc}, Error}}, StateData};
-handle_info({'EXIT', EP, {shutdown, {EP, Reason}}}, _StateName,
+handle_event(info, {'EXIT', EP, {shutdown, {EP, Reason}}}, _StateName,
 		#statedata{ep = EP, assoc = Assoc} = StateData) ->
 	{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData};
-handle_info({'EXIT', Receiver, Reason}, _StateName,
+handle_event(info, {'EXIT', Receiver, Reason}, _StateName,
 		#statedata{receiver = Receiver, ep = EP, assoc = Assoc} = StateData) ->
 	%% Where a closed port used to arrive. The receiver is this state
 	%% machine's only ear, so its exit ends the association rather than
 	%% leaving one that is up and hears nothing.
 	{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData};
-handle_info({'EXIT', LM, _Reason}, StateName,
+handle_event(info, {'EXIT', LM, _Reason}, StateName,
 		#statedata{lm = LM} = StateData) when is_pid(LM) ->
 	%% The layer manager links every association, and m3ua_sup restarts
 	%% it on its own. Its successor asks for this one (M-LM_ADOPT); its
 	%% death is no reason for the association to end.
 	{next_state, StateName, StateData};
-handle_info(Info, StateName, #statedata{receiver = Receiver, socket = _Socket,
+handle_event(info, Info, StateName, #statedata{receiver = Receiver, socket = _Socket,
 		ep = EP, assoc = Assoc, callback = CbMod,
 		cb_state = CbState, active = Active0, count = Count} = StateData) ->
 	Fallback = {ok, Active0, CbState},
@@ -1053,7 +1002,7 @@ handle_info(Info, StateName, #statedata{receiver = Receiver, socket = _Socket,
 -spec terminate(Reason :: normal | shutdown | {shutdown, term()} | term(),
 		StateName :: atom(), StateData :: #statedata{}) -> any().
 %% @doc Cleanup and exit.
-%% @see //stdlib/gen_fsm:terminate/3
+%% @see //stdlib/gen_statem:terminate/3
 %% @private
 %%
 terminate(Reason, StateName, #statedata{socket = undefined} = StateData) ->
@@ -1095,7 +1044,7 @@ terminate2(Reason, #statedata{callback = CbMod, cb_state = CbState}) ->
 		StateData :: term(), Extra :: term()) ->
 	{ok, NextStateName :: atom(), NewStateData :: #statedata{}}.
 %% @doc Update internal state data during a release upgrade&#047;downgrade.
-%% @see //stdlib/gen_fsm:code_change/4
+%% @see //stdlib/gen_statem:code_change/4
 %% @private
 %%
 code_change(_OldVsn, StateName, StateData, _Extra) ->
@@ -1818,11 +1767,11 @@ send_error(ErrorCode, StateName,
 	end.
 
 %% @hidden
-%% 	Time the acknowledgement of the request just sent. A gen_fsm
-%% 	timeout would not do: any message at all cancels it, so traffic
+%% 	Time the acknowledgement of the request just sent. An event
+%% 	timeout would not do: any event at all cancels it, so traffic
 %% 	arriving while the acknowledgement is awaited left the request
 %% 	outstanding for ever. A timer that fires after its request has
-%% 	been answered, or been replaced, is ignored by handle_info/3.
+%% 	been answered, or been replaced, is ignored by handle_event/4.
 start_tack(#statedata{timer = Timer} = StateData) ->
 	case Timer of
 		undefined ->

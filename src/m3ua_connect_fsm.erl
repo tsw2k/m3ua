@@ -14,21 +14,20 @@
 %%% See the License for the specific language governing permissions and
 %%% limitations under the License.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%% @doc This {@link //stdlib/gen_fsm. gen_fsm} behaviour callback
+%%% @doc This {@link //stdlib/gen_statem. gen_statem} behaviour callback
 %%% 	module implements the socket handler for outgoing SCTP connections
 %%%   in the {@link //m3ua. m3ua} application.
 %%%
 -module(m3ua_connect_fsm).
 -copyright('Copyright (c) 2015-2025 SigScale Global Inc.').
 
--behaviour(gen_fsm).
+-behaviour(gen_statem).
 
-%% export the callbacks needed for gen_fsm behaviour
--export([init/1, handle_event/3, handle_sync_event/4,
-		handle_info/3, terminate/3, code_change/4]).
+%% export the callbacks needed for gen_statem behaviour
+-export([init/1, callback_mode/0, terminate/3, code_change/4]).
 
-%% export the gen_fsm state callbacks
--export([connecting/2, connected/2]).
+%% export the gen_statem state callbacks
+-export([connecting/3, connected/3]).
 
 -include("m3ua.hrl").
 -include_lib("kernel/include/inet_sctp.hrl").
@@ -58,16 +57,26 @@
 -define(ERROR_WAIT, 60000).
 
 %%----------------------------------------------------------------------
-%%  The m3ua_connect_fsm gen_fsm callbacks
+%%  The m3ua_connect_fsm gen_statem callbacks
 %%----------------------------------------------------------------------
+
+-spec callback_mode() -> Result
+	when
+		Result :: gen_statem:callback_mode_result().
+%% @doc Set the callback mode of the callback module.
+%% @see //stdlib/gen_statem:callback_mode/0
+%% @private
+%%
+callback_mode() ->
+	[state_functions].
 
 -spec init(Args :: [term()]) ->
 	{ok, StateName :: atom(), StateData :: #statedata{}}
-			| {ok, StateName :: atom(),
-					StateData :: #statedata{}, timeout() | hibernate}
+			| {ok, StateName :: atom(), StateData :: #statedata{},
+					Actions :: [gen_statem:action()] | gen_statem:action()}
 			| {stop, Reason :: term()} | ignore.
 %% @doc Initialize the {@module} finite state machine.
-%% @see //stdlib/gen_fsm:init/1
+%% @see //stdlib/gen_statem:init/1
 %% @private
 %%
 init([Sup, Callback, Opts] = _Args) ->
@@ -123,23 +132,21 @@ init([Sup, Callback, Opts] = _Args) ->
 					options = Options, cb_options = CbOpts, callback = Callback,
 					remote_addr = Raddr, remote_port = Rport,
 					remote_opts = Ropts},
-			{ok, connecting, StateData, 0};
+			{ok, connecting, StateData, {timeout, 0, timeout}};
 		false ->
 			{stop, badarg}
 	end.
 
--spec connecting(Event :: timeout | term(), StateData :: #statedata{}) ->
-	{next_state, NextStateName :: atom(), NewStateData :: #statedata{}}
-			| {next_state, NextStateName :: atom(),
-					NewStateData :: #statedata{}, timeout() | hibernate}
-			| {stop, Reason :: term(), NewStateData :: #statedata{}}.
-%% @doc Handle events sent with {@link //stdlib/gen_fsm:send_event/2.
-%% 	gen_fsm:send_event/2} in the <b>connecting</b> state.
+-spec connecting(EventType :: gen_statem:event_type(),
+		EventContent :: term(), StateData :: #statedata{}) ->
+	Result :: gen_statem:event_handler_result(atom()).
+%% @doc Handle events received in the <b>connecting</b> state.
 %% @private
 %%
-connecting(timeout, #statedata{fsm_sup = undefined} = StateData) ->
-   connecting(timeout, get_sup(StateData));
-connecting(timeout, #statedata{options = LocalOptions,
+connecting(timeout, EventContent,
+		#statedata{fsm_sup = undefined} = StateData) ->
+	connecting(timeout, EventContent, get_sup(StateData));
+connecting(timeout, _EventContent, #statedata{options = LocalOptions,
 		remote_addr = RemoteAddress, remote_port = RemotePort,
 		remote_opts = ConnectOptions, name = Name} = StateData) ->
 	case m3ua_sctp:open(LocalOptions) of
@@ -167,7 +174,8 @@ connecting(timeout, #statedata{options = LocalOptions,
 							NewStateData = StateData#statedata{socket = undefined,
 									local_addr = undefined,
 									local_port = undefined},
-							{next_state, connecting, NewStateData, ?ERROR_WAIT}
+							{next_state, connecting, NewStateData,
+										{timeout, ?ERROR_WAIT, timeout}}
 					end;
 				{error, ReasonPort} ->
 					?LOG_ERROR("Socket has no local address",
@@ -184,162 +192,32 @@ connecting(timeout, #statedata{options = LocalOptions,
 					#{layer => m3ua, ep => self(), options => LocalOptions}),
 			{stop, ReasonOpen}
 	end;
-connecting({'M-SCTP_RELEASE', request, Ref, From},
+connecting(cast, {'M-SCTP_RELEASE', request, Ref, From},
 		#statedata{socket = Socket} = StateData) ->
 	gen_server:cast(From, {'M-SCTP_RELEASE', confirm, Ref, m3ua_sctp:close(Socket)}),
-	{stop, {shutdown, {self(), release}}, StateData}.
+	{stop, {shutdown, {self(), release}}, StateData};
+connecting(EventType, EventContent, StateData) ->
+	handle_event(EventType, EventContent, connecting, StateData).
 
--spec connected(Event :: timeout | term(), StateData :: #statedata{}) ->
-	{next_state, NextStateName :: atom(), NewStateData :: #statedata{}}
-			| {next_state, NextStateName :: atom(),
-					NewStateData :: #statedata{}, timeout() | hibernate}
-			| {stop, Reason :: term(), NewStateData :: #statedata{}}.
-%% @doc Handle events sent with {@link //stdlib/gen_fsm:send_event/2.
-%% 	gen_fsm:send_event/2} in the <b>connected</b> state.
+-spec connected(EventType :: gen_statem:event_type(),
+		EventContent :: term(), StateData :: #statedata{}) ->
+	Result :: gen_statem:event_handler_result(atom()).
+%% @doc Handle events received in the <b>connected</b> state.
 %% @private
 %%
-connected({'M-SCTP_RELEASE', request, Ref, From},
+connected(cast, {'M-SCTP_RELEASE', request, Ref, From},
 		#statedata{socket = Socket} = StateData) ->
 	gen_server:cast(From,
 			{'M-SCTP_RELEASE', confirm, Ref, m3ua_sctp:close(Socket)}),
-	{stop, {shutdown, {self(), release}}, StateData}.
-
--spec handle_event(Event :: term(), StateName :: atom(),
-		StateData :: #statedata{}) ->
-	{next_state, NextStateName :: atom(), NewStateData :: #statedata{}}
-			| {next_state, NextStateName :: atom(),
-					NewStateData :: #statedata{}, timeout() | hibernate}
-			| {stop, Reason :: term(), NewStateData :: #statedata{}}.
-%% @doc Handle an event sent with
-%% 	{@link //stdlib/gen_fsm:send_all_state_event/2.
-%% 	gen_fsm:send_all_state_event/2}.
-%% @see //stdlib/gen_fsm:handle_event/3
-%% @private
-%%
-handle_event(_Event, _StateName, StateData) ->
-	{stop, unimplemented, StateData}.
-
--spec handle_sync_event(Event :: term(), From :: {pid(), Tag :: term()},
-		StateName :: atom(), StateData :: #statedata{}) ->
-		{reply, Reply :: term(), NextStateName :: atom(),
-		NewStateData :: #statedata{}} | {stop, Reason :: term(),
-		Reply :: term(), NewStateData :: #statedata{}}.
-%% @doc Handle an event sent with
-%% 	{@link //stdlib/gen_fsm:sync_send_all_state_event/2.
-%% 	gen_fsm:sync_send_all_state_event/2,3}.
-%% @see //stdlib/gen_fsm:handle_sync_event/4
-%% @private
-%%
-handle_sync_event(getassoc, _From, connecting,
-		#statedata{assoc = undefined} = StateData) ->
-	{reply, [], connecting, StateData, ?RETRY_WAIT};
-handle_sync_event(getassoc, _From, connected,
-		#statedata{assoc = undefined} = StateData) ->
-	{reply, [], connected, StateData};
-handle_sync_event(getassoc, _From, connecting,
-		#statedata{assoc = Assoc} = StateData) ->
-	{reply, [Assoc], connecting, StateData, ?RETRY_WAIT};
-handle_sync_event(getassoc, _From, connected,
-		#statedata{assoc = Assoc} = StateData) ->
-	{reply, [Assoc], connected, StateData};
-handle_sync_event({getstat, undefined}, _From, connecting,
-		#statedata{socket = Socket} = StateData) ->
-	{reply, m3ua_sctp:getstat(Socket), connecting, StateData, ?RETRY_WAIT};
-handle_sync_event({getstat, undefined}, _From, connected,
-		#statedata{socket = Socket} = StateData) ->
-	{reply, m3ua_sctp:getstat(Socket), connected, StateData};
-handle_sync_event({getstat, Options}, _From, connecting,
-		#statedata{socket = Socket} = StateData) ->
-	{reply, m3ua_sctp:getstat(Socket, Options), connecting, StateData, ?RETRY_WAIT};
-handle_sync_event({getstat, Options}, _From, connected,
-		#statedata{socket = Socket} = StateData) ->
-	{reply, m3ua_sctp:getstat(Socket, Options), connected, StateData};
-handle_sync_event(getep, _From, StateName,
-		#statedata{name = Name, role = Role,
-		local_addr = Laddr, local_port = Lport,
-		remote_addr = Raddr, remote_port = Rport} = StateData) ->
-	Reply = {Name, client, Role, {Laddr, Lport}, {Raddr, Rport}},
-	{reply, Reply, StateName, StateData}.
-
--spec handle_info(Info :: term(), StateName :: atom(),
-		StateData :: #statedata{}) ->
-	{next_state, NextStateName :: atom(), NewStateData :: #statedata{}}
-			| {next_state, NextStateName :: atom(),
-					NewStateData :: #statedata{}, timeout() | hibernate}
-			| {stop, Reason :: normal | term(), NewStateData :: #statedata{}}.
-%% @doc Handle a received message.
-%% @see //stdlib/gen_fsm:handle_info/3
-%% @private
-%%
-handle_info({sctp, Socket, _PeerAddr, _PeerPort,
-		{_AncData, #sctp_assoc_change{state = comm_up,
-		assoc_id = Assoc} = AssocChange}}, connecting,
-		#statedata{socket = Socket} = StateData) ->
-	NewStateData = StateData#statedata{socket = Socket, assoc = Assoc},
-	handle_connect(AssocChange, NewStateData);
-handle_info({sctp, Socket, _PeerAddr, _PeerPort,
-		{_AncData, #sctp_assoc_change{state = _Reason}}}, connecting,
-		#statedata{socket = Socket, receiver = Receiver} = StateData) ->
-	m3ua_receiver:stop(Receiver),
-	m3ua_sctp:close(Socket),
-	NewStateData = StateData#statedata{socket = undefined,
-			receiver = undefined},
-	{next_state, connecting, NewStateData, ?RETRY_WAIT};
-handle_info({sctp, Socket, _PeerAddr, _PeerPort, {_AncData, Event}},
-		StateName, #statedata{socket = Socket,
-		receiver = Receiver} = StateData)
-		when is_record(Event, sctp_adaptation_event);
-		is_record(Event, sctp_paddr_change) ->
-	%% Linux queues the adaptation layer indication ahead of the
-	%% association's own comm_up, so this arrives while still
-	%% connecting and says nothing about whether the association will
-	%% come up. Note it by asking for the next message.
-	m3ua_receiver:replenish(Receiver, once),
-	{next_state, StateName, StateData};
-handle_info({'EXIT', Receiver, Reason}, _StateName,
-		#statedata{receiver = Receiver, socket = Socket} = StateData)
-		when Receiver /= undefined ->
-	_ = m3ua_sctp:close(Socket),
-	{stop, {shutdown, {self(), {receiver, Reason}}}, StateData};
-handle_info({'EXIT', Fsm, {shutdown, {{EP, Assoc}, Reason}}},
-		_StateName, #statedata{socket = Socket, fsm = Fsm,
-		remote_addr = Address, remote_port = Port} = StateData) ->
-	%% The association ended in an orderly way -- lost, shut down,
-	%% released -- and the state machine that carried it said so. Connect
-	%% again from here rather than by dying: every death of this process
-	%% is a restart its supervisor counts, and ten a minute take the
-	%% endpoint down. A crash of the state machine still takes this
-	%% process with it, below, and is counted.
-	_ = m3ua_sctp:close(Socket),
-	?LOG_NOTICE("Association ended, connecting again",
-			#{layer => m3ua, ep => EP, assoc => Assoc,
-			remote => {Address, Port}, reason => Reason}),
-	NewStateData = StateData#statedata{socket = undefined,
-			receiver = undefined, fsm = undefined, assoc = undefined,
-			local_addr = undefined, local_port = undefined},
-	{next_state, connecting, NewStateData, 0};
-handle_info({'EXIT', Fsm, Reason}, _StateName,
-		#statedata{socket = undefined, fsm = Fsm} = StateData) ->
-	{stop, Reason, StateData};
-handle_info({'EXIT', Fsm, Reason}, _StateName,
-		#statedata{socket = Socket, fsm = Fsm} = StateData) ->
-	m3ua_sctp:close(Socket),
-	{stop, Reason, StateData};
-%% What is left linked is the layer manager, which m3ua_sup restarts on
-%% its own and whose successor links this endpoint again. Its death is
-%% no reason for the endpoint to die. Waiting to try again, the wait is
-%% asked for again: gen_fsm cancels it on any message at all.
-handle_info({'EXIT', _Pid, _Reason}, connecting,
-		#statedata{socket = undefined} = StateData) ->
-	{next_state, connecting, StateData, ?RETRY_WAIT};
-handle_info({'EXIT', _Pid, _Reason}, StateName, StateData) ->
-	{next_state, StateName, StateData}.
+	{stop, {shutdown, {self(), release}}, StateData};
+connected(EventType, EventContent, StateData) ->
+	handle_event(EventType, EventContent, connected, StateData).
 
 -spec terminate(Reason :: normal | shutdown | {shutdown, term()} | term(),
 		StateName :: atom(), StateData :: #statedata{}) ->
 	any().
 %% @doc Cleanup and exit.
-%% @see //stdlib/gen_fsm:terminate/3
+%% @see //stdlib/gen_statem:terminate/3
 %% @private
 %%
 terminate(_Reason, _StateName, #statedata{socket = undefined}) ->
@@ -359,7 +237,7 @@ terminate(_Reason, _StateName, #statedata{socket = Socket} = StateData) ->
 		StateData :: term(), Extra :: term()) ->
 	{ok, NextStateName :: atom(), NewStateData :: #statedata{}}.
 %% @doc Update internal state data during a release upgrade&#047;downgrade.
-%% @see //stdlib/gen_fsm:code_change/4
+%% @see //stdlib/gen_statem:code_change/4
 %% @private
 %%
 code_change(_OldVsn, StateName, StateData, _Extra) ->
@@ -368,6 +246,118 @@ code_change(_OldVsn, StateName, StateData, _Extra) ->
 %%----------------------------------------------------------------------
 %%  internal functions
 %%----------------------------------------------------------------------
+
+-spec handle_event(EventType :: gen_statem:event_type(),
+		EventContent :: term(), StateName :: atom(),
+		StateData :: #statedata{}) ->
+	Result :: gen_statem:event_handler_result(atom()).
+%% @doc Handle events common to all states.
+%% @hidden
+handle_event({call, From}, getassoc, connecting,
+		#statedata{assoc = undefined} = StateData) ->
+	{next_state, connecting, StateData,
+			[{reply, From, []}, {timeout, ?RETRY_WAIT, timeout}]};
+handle_event({call, From}, getassoc, connected,
+		#statedata{assoc = undefined} = StateData) ->
+	{next_state, connected, StateData, {reply, From, []}};
+handle_event({call, From}, getassoc, connecting,
+		#statedata{assoc = Assoc} = StateData) ->
+	{next_state, connecting, StateData,
+			[{reply, From, [Assoc]}, {timeout, ?RETRY_WAIT, timeout}]};
+handle_event({call, From}, getassoc, connected,
+		#statedata{assoc = Assoc} = StateData) ->
+	{next_state, connected, StateData, {reply, From, [Assoc]}};
+handle_event({call, From}, {getstat, undefined}, connecting,
+		#statedata{socket = Socket} = StateData) ->
+	{next_state, connecting, StateData,
+			[{reply, From, m3ua_sctp:getstat(Socket)},
+			{timeout, ?RETRY_WAIT, timeout}]};
+handle_event({call, From}, {getstat, undefined}, connected,
+		#statedata{socket = Socket} = StateData) ->
+	{next_state, connected, StateData,
+			{reply, From, m3ua_sctp:getstat(Socket)}};
+handle_event({call, From}, {getstat, Options}, connecting,
+		#statedata{socket = Socket} = StateData) ->
+	{next_state, connecting, StateData,
+			[{reply, From, m3ua_sctp:getstat(Socket, Options)},
+			{timeout, ?RETRY_WAIT, timeout}]};
+handle_event({call, From}, {getstat, Options}, connected,
+		#statedata{socket = Socket} = StateData) ->
+	{next_state, connected, StateData,
+			{reply, From, m3ua_sctp:getstat(Socket, Options)}};
+handle_event({call, From}, getep, StateName,
+		#statedata{name = Name, role = Role,
+		local_addr = Laddr, local_port = Lport,
+		remote_addr = Raddr, remote_port = Rport} = StateData) ->
+	Reply = {Name, client, Role, {Laddr, Lport}, {Raddr, Rport}},
+	{next_state, StateName, StateData, {reply, From, Reply}};
+handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort,
+		{_AncData, #sctp_assoc_change{state = comm_up,
+		assoc_id = Assoc} = AssocChange}}, connecting,
+		#statedata{socket = Socket} = StateData) ->
+	NewStateData = StateData#statedata{socket = Socket, assoc = Assoc},
+	handle_connect(AssocChange, NewStateData);
+handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort,
+		{_AncData, #sctp_assoc_change{state = _Reason}}}, connecting,
+		#statedata{socket = Socket, receiver = Receiver} = StateData) ->
+	m3ua_receiver:stop(Receiver),
+	m3ua_sctp:close(Socket),
+	NewStateData = StateData#statedata{socket = undefined,
+			receiver = undefined},
+	{next_state, connecting, NewStateData,
+			{timeout, ?RETRY_WAIT, timeout}};
+handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort, {_AncData, Event}},
+		StateName, #statedata{socket = Socket,
+		receiver = Receiver} = StateData)
+		when is_record(Event, sctp_adaptation_event);
+		is_record(Event, sctp_paddr_change) ->
+	%% Linux queues the adaptation layer indication ahead of the
+	%% association's own comm_up, so this arrives while still
+	%% connecting and says nothing about whether the association will
+	%% come up. Note it by asking for the next message.
+	m3ua_receiver:replenish(Receiver, once),
+	{next_state, StateName, StateData};
+handle_event(info, {'EXIT', Receiver, Reason}, _StateName,
+		#statedata{receiver = Receiver, socket = Socket} = StateData)
+		when Receiver /= undefined ->
+	_ = m3ua_sctp:close(Socket),
+	{stop, {shutdown, {self(), {receiver, Reason}}}, StateData};
+handle_event(info, {'EXIT', Fsm, {shutdown, {{EP, Assoc}, Reason}}},
+		_StateName, #statedata{socket = Socket, fsm = Fsm,
+		remote_addr = Address, remote_port = Port} = StateData) ->
+	%% The association ended in an orderly way -- lost, shut down,
+	%% released -- and the state machine that carried it said so. Connect
+	%% again from here rather than by dying: every death of this process
+	%% is a restart its supervisor counts, and ten a minute take the
+	%% endpoint down. A crash of the state machine still takes this
+	%% process with it, below, and is counted.
+	_ = m3ua_sctp:close(Socket),
+	?LOG_NOTICE("Association ended, connecting again",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			remote => {Address, Port}, reason => Reason}),
+	NewStateData = StateData#statedata{socket = undefined,
+			receiver = undefined, fsm = undefined, assoc = undefined,
+			local_addr = undefined, local_port = undefined},
+	{next_state, connecting, NewStateData, {timeout, 0, timeout}};
+handle_event(info, {'EXIT', Fsm, Reason}, _StateName,
+		#statedata{socket = undefined, fsm = Fsm} = StateData) ->
+	{stop, Reason, StateData};
+handle_event(info, {'EXIT', Fsm, Reason}, _StateName,
+		#statedata{socket = Socket, fsm = Fsm} = StateData) ->
+	m3ua_sctp:close(Socket),
+	{stop, Reason, StateData};
+%% What is left linked is the layer manager, which m3ua_sup restarts on
+%% its own and whose successor links this endpoint again. Its death is
+%% no reason for the endpoint to die. Waiting to try again, the wait is
+%% asked for again: an event timeout is cancelled by any event.
+handle_event(info, {'EXIT', _Pid, _Reason}, connecting,
+		#statedata{socket = undefined} = StateData) ->
+	{next_state, connecting, StateData,
+			{timeout, ?RETRY_WAIT, timeout}};
+handle_event(info, {'EXIT', _Pid, _Reason}, StateName, StateData) ->
+	{next_state, StateName, StateData};
+handle_event(cast, _Event, _StateName, StateData) ->
+	{stop, unimplemented, StateData}.
 
 %% @hidden
 get_sup(#statedata{role = asp, sup = Sup} = StateData) ->
