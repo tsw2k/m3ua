@@ -45,8 +45,12 @@ association:
 
 - SSNM can be sent: DUNA, DAVA, DUPU, DRST and SCON by a signalling gateway,
   DAUD by an ASP;
+- an ASP takes a DRST as MTP-RESUME, like a DAVA (§5.4), and a DUPU through the
+  optional callback `unavailable_user/6` (§5.5.2.3.4);
 - an ASP UP at an active ASP is acknowledged, answered with ERR and leaves the
-  ASP inactive (§4.3.4.1);
+  ASP inactive; at an inactive one it is acknowledged and nothing more; an ASP
+  UP ACK the ASP did not ask for leaves it inactive, and from active or down it
+  asks to go back (§4.3.4.1);
 - ASP DOWN, and ASP UP at an active ASP, deregister the routing keys the ASP
   registered; membership given by configuration stays (§4.3.4);
 - DEREG REQ and DEREG RSP (§4.4.2), and a REG RSP is matched to its request by

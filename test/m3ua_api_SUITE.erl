@@ -100,6 +100,7 @@ all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
 			connect_options, stop_endpoint, lm_stray, reconnect_in_place,
 			endpoint_gives_up, lm_restart, callback_raised, asp_up_ack_unexpected,
+			asp_drst_dupu,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
@@ -1007,6 +1008,44 @@ asp_status(EP, Assoc, State, N) ->
 			timer:sleep(50),
 			asp_status(EP, Assoc, State, N - 1)
 	end.
+
+asp_drst_dupu() ->
+	[{userdata, [{doc, "A DRST reaches the asp's user as MTP-RESUME, a DUPU as unavailable_user (RFC 4666 5.4, 5.5.2.3.4)."}]}].
+
+asp_drst_dupu(_Config) ->
+	Self = self(),
+	Fresume = fun(_Stream, _RCs, APCs, State, _Pid) ->
+				Self ! {resume, lists:flatten(APCs)},
+				{ok, State}
+	end,
+	Funavailable = fun(_Stream, _RCs, APCs, User, Cause, State, _Pid) ->
+				Self ! {unavailable_user, APCs, User, Cause},
+				{ok, State}
+	end,
+	Callback = (callback(make_ref()))#m3ua_fsm_cb{resume = Fresume,
+			unavailable_user = Funavailable},
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(Callback),
+	APC = rand:uniform(16#ffffff) - 1,
+	Drst = #m3ua{class = ?SSNMMessage, type = ?SSNMDRST,
+			params = [{?AffectedPointCode, [APC]}]},
+	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(Drst)),
+	[APC] = receive {resume, APCs1} -> APCs1 after 4000 -> timeout end,
+	Dupu = #m3ua{class = ?SSNMMessage, type = ?SSNMDUPU,
+			params = [{?AffectedPointCode, [APC]},
+			{?UserCause, {isup, unequipped_remote_user}}]},
+	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(Dupu)),
+	{[APC], isup, unequipped_remote_user} = receive
+		{unavailable_user, APCs2, User, Cause} ->
+			{APCs2, User, Cause}
+	after
+		4000 ->
+			timeout
+	end,
+	%% Neither answered with an ERR, as both used to be.
+	nothing_sent = raw_get(Peer),
+	{ok, #{drst_in := 1, dupu_in := 1}} = m3ua:getcount(EP, Assoc),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
 
 %% @hidden
 %% 	The endpoints started with `Name'. One stopping or restarting

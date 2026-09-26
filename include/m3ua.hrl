@@ -168,6 +168,7 @@
 		resume = false :: fun() | false,
 		status = false :: fun() | false,
 		audit = false :: fun() | false,
+		unavailable_user = false :: fun() | false,
 		register = false :: fun() | false,
 		asp_up = false :: fun() | false,
 		asp_down = false :: fun() | false,

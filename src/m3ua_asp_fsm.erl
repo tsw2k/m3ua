@@ -429,6 +429,20 @@
 		Reason :: term(),
 		State :: term(),
 		Result :: any().
+-callback unavailable_user(Stream, RCs, APCs, User, Cause, State) -> Result
+	when
+		Stream :: pos_integer(),
+		RCs :: [RC],
+		RC :: 0..4294967295,
+		APCs :: [APC],
+		APC :: 0..16777215,
+		User :: m3ua_codec:mtp3_user(),
+		Cause :: m3ua_codec:mtp3_cause(),
+		State :: term(),
+		Result :: {ok, NewState} | {error, Reason},
+		NewState :: term(),
+		Reason :: term().
+-optional_callbacks([unavailable_user/6]).
 
 %%----------------------------------------------------------------------
 %%  The m3ua_asp_fsm gen_fsm callbacks
@@ -1165,7 +1179,8 @@ carrying_reason(Other) ->
 %% 	is said here, where the configuration that decides it is known.
 %% @hidden
 report_discarding(Cb, EP, Assoc) ->
-	case m3ua_callback:discarding(Cb, [recv, pause, resume, status]) of
+	case m3ua_callback:discarding(Cb,
+			[recv, pause, resume, status, unavailable_user]) of
 		[] ->
 			ok;
 		Discarded ->
@@ -1612,6 +1627,45 @@ handle_asp(#m3ua{class = ?SSNMMessage, type = ?SSNMDUNA, params = Params},
 	NewCount = maps:put(duna_in, DunaIn + 1, Count1),
 	NewStateData = StateData#statedata{cb_state = NewCbState, count = NewCount},
 	{next_state, StateName, NewStateData};
+%% RFC4666, Section-5.4: "When the M3UA receives a DAVA/DRST message,
+%% MTP Users will receive an MTP-RESUME indication".
+handle_asp(#m3ua{class = ?SSNMMessage, type = ?SSNMDRST, params = Params},
+		StateName, Stream, #statedata{callback = CbMod, cb_state = CbState,
+		receiver = Receiver, active = Active, count = Count} = StateData)
+		when CbMod /= undefined ->
+	Parameters = m3ua_codec:parameters(Params),
+	RCs = m3ua_codec:get_parameter(?RoutingContext, Parameters, []),
+	APCs = m3ua_codec:get_all_parameter(?AffectedPointCode, Parameters),
+	CbArgs = [Stream, RCs, APCs, CbState],
+	{{ok, NewCbState}, Count1} = contain(resume, CbMod, CbArgs,
+			{ok, CbState}, Count, StateData#statedata.ep,
+			StateData#statedata.assoc),
+	ok = m3ua_receiver:replenish(Receiver, Active),
+	DrstIn = maps:get(drst_in, Count1, 0),
+	NewCount = maps:put(drst_in, DrstIn + 1, Count1),
+	NewStateData = StateData#statedata{cb_state = NewCbState, count = NewCount},
+	{next_state, StateName, NewStateData};
+%% RFC4666, Section-5.5.2.3.4: a DUPU is an MTP-STATUS indication to the
+%% MTP3-User, naming the user part that cannot be reached and why.
+handle_asp(#m3ua{class = ?SSNMMessage, type = ?SSNMDUPU, params = Params},
+		StateName, Stream, #statedata{callback = CbMod, cb_state = CbState,
+		receiver = Receiver, active = Active, count = Count,
+		ep = EP, assoc = Assoc} = StateData)
+		when CbMod /= undefined ->
+	Parameters = m3ua_codec:parameters(Params),
+	RCs = m3ua_codec:get_parameter(?RoutingContext, Parameters, []),
+	APCs = lists:append(m3ua_codec:get_all_parameter(?AffectedPointCode,
+			Parameters)),
+	{User, Cause} = m3ua_codec:fetch_parameter(?UserCause, Parameters),
+	CbArgs = [Stream, RCs, APCs, User, Cause, CbState],
+	F = fun() -> unavailable_user(CbMod, CbArgs, CbState, EP, Assoc) end,
+	{{ok, NewCbState}, Count1} = contain1(unavailable_user, F,
+			{ok, CbState}, Count, EP, Assoc),
+	ok = m3ua_receiver:replenish(Receiver, Active),
+	DupuIn = maps:get(dupu_in, Count1, 0),
+	NewCount = maps:put(dupu_in, DupuIn + 1, Count1),
+	NewStateData = StateData#statedata{cb_state = NewCbState, count = NewCount},
+	{next_state, StateName, NewStateData};
 handle_asp(#m3ua{class = ?SSNMMessage, type = ?SSNMDAVA, params = Params},
 		StateName, Stream, #statedata{callback = CbMod, cb_state = CbState,
 		socket = _Socket, receiver = Receiver, active = Active, count = Count} = StateData)
@@ -1761,7 +1815,11 @@ start_tack(#statedata{timer = Timer} = StateData) ->
 %% 	which is what the callback would have answered had it done nothing
 %% 	and kept its state.
 contain(Handler, CbMod, CbArgs, Fallback, Count, EP, Assoc) ->
-	try m3ua_callback:cb(Handler, CbMod, CbArgs) of
+	F = fun() -> m3ua_callback:cb(Handler, CbMod, CbArgs) end,
+	contain1(Handler, F, Fallback, Count, EP, Assoc).
+%% @hidden
+contain1(Handler, F, Fallback, Count, EP, Assoc) ->
+	try F() of
 		Result ->
 			{Result, Count}
 	catch
@@ -1854,6 +1912,31 @@ return_to(Previous, #statedata{socket = Socket, peer_addr = PeerAddr,
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end.
+
+%% @hidden
+%% 	unavailable_user/6 is optional: a callback module written before it
+%% 	existed does not export it, and a DUPU must not end the association
+%% 	for that. It goes no further, and says so.
+unavailable_user(CbMod, CbArgs, CbState, EP, Assoc) when is_atom(CbMod) ->
+	case code:ensure_loaded(CbMod) of
+		{module, CbMod} ->
+			case erlang:function_exported(CbMod, unavailable_user, 6) of
+				true ->
+					m3ua_callback:cb(unavailable_user, CbMod, CbArgs);
+				false ->
+					?LOG_NOTICE("DUPU not delivered",
+							#{layer => m3ua, ep => EP, assoc => Assoc,
+							callback => CbMod, reason => no_callback}),
+					{ok, CbState}
+			end;
+		{error, Reason} ->
+			?LOG_NOTICE("DUPU not delivered",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					callback => CbMod, reason => Reason}),
+			{ok, CbState}
+	end;
+unavailable_user(#m3ua_fsm_cb{} = CbMod, CbArgs, _CbState, _EP, _Assoc) ->
+	m3ua_callback:cb(unavailable_user, CbMod, CbArgs).
 
 %% @hidden
 generate_lrk_id() ->

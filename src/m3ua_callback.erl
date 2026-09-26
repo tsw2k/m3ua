@@ -22,7 +22,7 @@
 
 %% export the m3ua_callback public API
 -export([init/6, recv/9, send/11, pause/4, resume/4, status/4,
-		audit/4, register/5, asp_up/1, asp_down/1, asp_active/1,
+		audit/4, unavailable_user/6, register/5, asp_up/1, asp_down/1, asp_active/1,
 		asp_inactive/1, notify/4, info/2, terminate/2]).
 
 %% export the m3ua_callback private API
@@ -123,6 +123,27 @@ resume(_Stream, _RK, _DPCs, State) ->
 		NewState :: term(),
 		Reason :: term().
 status(_Stream, _RK, _DPCs, State) ->
+	{ok, State}.
+
+-spec unavailable_user(Stream, RCs, APCs, User, Cause, State) -> Result
+	when
+		Stream :: pos_integer(),
+		RCs :: [RC],
+		RC :: 0..4294967295,
+		APCs :: [APC],
+		APC :: 0..16777215,
+		User :: m3ua_codec:mtp3_user(),
+		Cause :: m3ua_codec:mtp3_cause(),
+		State :: term(),
+		Result :: {ok, NewState} | {error, Reason},
+		NewState :: term(),
+		Reason :: term().
+%% @doc A Destination User Part Unavailable (DUPU) was received.
+%%
+%% 	RFC 4666 5.5.2.3.4 maps it to an MTP-STATUS indication to the
+%% 	MTP3-User: `User' at the affected point code cannot be reached, for
+%% 	`Cause'. The default takes no action.
+unavailable_user(_Stream, _RCs, _APCs, _User, _Cause, State) ->
 	{ok, State}.
 
 -spec audit(Stream, RCs, APCs, State) -> Result
@@ -260,6 +281,8 @@ takes(#m3ua_fsm_cb{status = F}, status) ->
 	F /= false;
 takes(#m3ua_fsm_cb{audit = F}, audit) ->
 	F /= false;
+takes(#m3ua_fsm_cb{unavailable_user = F}, unavailable_user) ->
+	F /= false;
 takes(#m3ua_fsm_cb{}, _Name) ->
 	true.
 
@@ -287,6 +310,10 @@ cb(send, #m3ua_fsm_cb{send = F, extra = E}, Args) ->
 cb(audit, #m3ua_fsm_cb{audit = false}, Args) ->
 	apply(?MODULE, audit, Args);
 cb(audit, #m3ua_fsm_cb{audit = F, extra = E}, Args) ->
+	apply(F, Args ++ E);
+cb(unavailable_user, #m3ua_fsm_cb{unavailable_user = false}, Args) ->
+	apply(?MODULE, unavailable_user, Args);
+cb(unavailable_user, #m3ua_fsm_cb{unavailable_user = F, extra = E}, Args) ->
 	apply(F, Args ++ E);
 cb(pause, #m3ua_fsm_cb{pause = false}, Args) ->
 	apply(?MODULE, pause, Args);
