@@ -534,7 +534,7 @@ inactive({call, From}, {'MTP-TRANSFER', request, _Params},
 			#{layer => m3ua, ep => EP, assoc => Assoc, reason => asp_inactive}),
 	Discarded = maps:get(transfer_discarded, Count, 0),
 	NewCount = maps:put(transfer_discarded, Discarded + 1, Count),
-	{next_state, down, StateData#statedata{count = NewCount},
+	{next_state, inactive, StateData#statedata{count = NewCount},
 			{reply, From, {error, unexpected_message}}};
 inactive(EventType, EventContent, StateData) ->
 	handle_event(EventType, EventContent, inactive, StateData).

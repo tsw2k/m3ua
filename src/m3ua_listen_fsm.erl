@@ -230,6 +230,14 @@ handle_event({call, From}, getep, StateName,
 	{next_state, StateName, StateData, {reply, From, Reply}};
 handle_event(info, {sctp, Socket, PeerAddr, PeerPort,
 		{_AncData, #sctp_assoc_change{state = comm_up} = AssocChange}},
+		listening, #statedata{fsm_sup = undefined,
+		socket = Socket} = StateData) ->
+	%% Ahead of the zero timeout that finds the supervisor, which this
+	%% message has just cancelled: find it now.
+	#statedata{fsm_sup = FsmSup} = NewStateData = get_sup(StateData),
+	accept(Socket, PeerAddr, PeerPort, AssocChange, FsmSup, NewStateData);
+handle_event(info, {sctp, Socket, PeerAddr, PeerPort,
+		{_AncData, #sctp_assoc_change{state = comm_up} = AssocChange}},
 		listening, #statedata{fsm_sup = FsmSup, socket = Socket} = StateData) ->
 	accept(Socket, PeerAddr, PeerPort, AssocChange, FsmSup, StateData);
 handle_event(info, {sctp, _Socket, _PeerAddr, _PeerPort, {_AncData, Event}},
