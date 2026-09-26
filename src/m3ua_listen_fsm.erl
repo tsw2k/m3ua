@@ -299,6 +299,19 @@ ended(#statedata{ended = Ended} = StateData) ->
 	StateData#statedata{ended = Ended + 1}.
 
 %% @hidden
+%% 	A state machine for a new association. The supervisor may be gone
+%% 	-- the endpoint is being stopped, and a comm_up arrived first --
+%% 	and a call to it then exits, where every other failure is an
+%% 	answer; both are the association's loss and nothing more.
+start_fsm(Sup, Args) ->
+	try
+		supervisor:start_child(Sup, Args)
+	catch
+		exit:Reason ->
+			{error, Reason}
+	end.
+
+%% @hidden
 get_sup(#statedata{role = asp, sup = Sup} = StateData) ->
 	Children = supervisor:which_children(Sup),
 	{_, AspSup, _, _} = lists:keyfind(m3ua_asp_sup, 1, Children),
@@ -316,7 +329,7 @@ accept(Socket, Address, Port,
 		static = Static, use_rc = UseRC} = StateData) ->
 	case m3ua_sctp:peeloff(Socket, Assoc) of
 		{ok, NewSocket} ->
-			case supervisor:start_child(Sup,
+			case start_fsm(Sup,
 					[[NewSocket, Address, Port, AssocChange, self(),
 					Name, Cb, Static, UseRC, CbOpts], []]) of
 				{ok, Fsm} ->
