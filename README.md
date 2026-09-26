@@ -53,6 +53,9 @@ association:
   asks to go back (§4.3.4.1);
 - ASP DOWN, and ASP UP at an active ASP, deregister the routing keys the ASP
   registered; membership given by configuration stays (§4.3.4);
+- an application server a REG REQ created is removed once the last ASP that
+  registered into it has left; one configured with `m3ua:as_add/7` stays
+  (§4.4.2);
 - DEREG REQ and DEREG RSP (§4.4.2), and a REG RSP is matched to its request by
   the local routing key identifier;
 - DATA and SSNM are sent without a routing context where there is none to

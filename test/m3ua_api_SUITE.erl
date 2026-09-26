@@ -104,7 +104,7 @@ all() ->
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
-			sgp_deregister_local, asp_deregister,
+			sgp_deregister_local, sgp_deregister_named, asp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
 			asp_inactive_to_down, asp_active_to_down,
@@ -498,7 +498,7 @@ sgp_deregister(_Config) ->
 	ok = raw_put(Peer, PeerAssoc, AspDown),
 	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPDNACK),
 	down = m3ua:asp_status(EP, Assoc),
-	[] = as_asps(RC1),
+	removed = as_asps(RC1),
 	RC1 = deregistered_rc(),
 	%% Register again, go active, then ASP UP: the same.
 	ok = raw_put(Peer, PeerAssoc, AspUp),
@@ -512,7 +512,7 @@ sgp_deregister(_Config) ->
 	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
 	#m3ua{} = raw_expect(Peer, ?MGMTMessage, ?MGMTError),
 	inactive = m3ua:asp_status(EP, Assoc),
-	[] = as_asps(RC2),
+	removed = as_asps(RC2),
 	RC2 = deregistered_rc(),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
@@ -536,10 +536,10 @@ sgp_dereg_req(_Config) ->
 	Bogus = unused_rc(),
 	[{RC1, deregistered}, {Bogus, invalid_rc}]
 			= raw_dereg(Peer, PeerAssoc, [RC1, Bogus]),
-	[] = as_asps(RC1),
+	removed = as_asps(RC1),
 	[_] = as_asps(RC2),
-	%% Once gone, it is not registered.
-	[{RC1, not_registered}] = raw_dereg(Peer, PeerAssoc, [RC1]),
+	%% The application server its REG REQ made went with it (4.4.2).
+	[{RC1, invalid_rc}] = raw_dereg(Peer, PeerAssoc, [RC1]),
 	{ok, #{dereg_in := 3, dereg_rsp_out := 3}} = m3ua:getcount(EP, Assoc),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
@@ -554,9 +554,29 @@ sgp_deregister_local(_Config) ->
 	RC = raw_register(Peer, PeerAssoc),
 	[_] = as_asps(RC),
 	ok = m3ua:deregister(EP, Assoc, RC),
-	[] = as_asps(RC),
+	removed = as_asps(RC),
 	RC = deregistered_rc(),
 	{error, not_registered} = m3ua:deregister(EP, Assoc, RC),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+sgp_deregister_named() ->
+	[{userdata, [{doc, "An application server layer management configured stays when its last registered asp leaves (RFC 4666 4.4.2)."}]}].
+
+sgp_deregister_named(_Config) ->
+	{Peer, PeerAssoc, EP, _Assoc} = raw_asp(),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	RC = unused_rc(),
+	Keys = [{rand:uniform(16383), [], []}],
+	{ok, _} = m3ua:as_add(make_ref(), RC, 0, Keys, loadshare, 1, 1),
+	RC = raw_register(Peer, PeerAssoc, RC, Keys),
+	[_] = as_asps(RC),
+	[{RC, deregistered}] = raw_dereg(Peer, PeerAssoc, [RC]),
+	%% Still there, empty, and this asp no member of it.
+	[] = as_asps(RC),
+	[{RC, not_registered}] = raw_dereg(Peer, PeerAssoc, [RC]),
+	ok = m3ua:as_delete(RC),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 
@@ -673,8 +693,10 @@ unused_rc() ->
 %% 	Register one routing key with a REG REQ and answer the routing
 %% 	context the REG RSP gives it.
 raw_register(Peer, PeerAssoc) ->
-	Keys = [{rand:uniform(16383), [], []}],
-	RK = m3ua_codec:routing_key(#m3ua_routing_key{na = 0,
+	raw_register(Peer, PeerAssoc, undefined, [{rand:uniform(16383), [], []}]).
+%% @hidden
+raw_register(Peer, PeerAssoc, RC0, Keys) ->
+	RK = m3ua_codec:routing_key(#m3ua_routing_key{rc = RC0, na = 0,
 			tmt = loadshare, key = Keys, lrk_id = 1}),
 	Params = m3ua_codec:parameters([{?RoutingKey, RK}]),
 	RegReq = #m3ua{class = ?RKMMessage, type = ?RKMREGREQ, params = Params},
@@ -687,8 +709,12 @@ raw_register(Peer, PeerAssoc) ->
 
 %% @hidden
 as_asps(RC) ->
-	[#m3ua_as{asp = ASPs}] = mnesia:dirty_read(m3ua_as, RC),
-	ASPs.
+	case mnesia:dirty_read(m3ua_as, RC) of
+		[#m3ua_as{asp = ASPs}] ->
+			ASPs;
+		[] ->
+			removed
+	end.
 
 %% @hidden
 %% 	The same plain SCTP socket as protocol_identifier/1, standing in

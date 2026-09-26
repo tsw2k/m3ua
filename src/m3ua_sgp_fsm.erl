@@ -897,18 +897,25 @@ terminate(Reason, StateName, #statedata{socket = Socket} = StateData) ->
 	end,
 	terminate1(Reason, StateName, StateData).
 %% @hidden
-terminate1(Reason, _StateName, #statedata{rks = RKs} = StateData) ->
+terminate1(Reason, _StateName, #statedata{rks = RKs, registered = Registered,
+		ep = EP, assoc = Assoc} = StateData) ->
 	Fsm = self(),
 	Fdel = fun F([{RC, _RK, _Active} | T]) ->
 				[#m3ua_as{asp = L1} = AS] = mnesia:read(m3ua_as, RC, write),
 				L2 = lists:keydelete(Fsm, #m3ua_as_asp.fsm, L1),
-				mnesia:write(AS#m3ua_as{asp = L2}),
+				case removable(L2, lists:member(RC, Registered), AS) of
+					true ->
+						mnesia:delete(m3ua_as, RC, write);
+					false ->
+						mnesia:write(AS#m3ua_as{asp = L2})
+				end,
 				mnesia:delete(m3ua_asp, Fsm, write),
 				F(T);
 			F([]) ->
 				ok
 	end,
 	mnesia:transaction(Fdel, [RKs]),
+	report_removed(Registered, EP, Assoc),
 	terminate2(Reason, StateData).
 %% @hidden
 terminate2(_, #statedata{callback = undefined}) ->
@@ -1115,11 +1122,13 @@ handle_dereg({'M-RK_DEREG', request, Ref, From, RC}, StateName,
 	case lists:keymember(RC, 1, RKs) of
 		true ->
 			Fsm = self(),
-			case mnesia:transaction(fun() -> deregister1(Fsm, RC) end) of
+			Reg = lists:member(RC, Registered),
+			case mnesia:transaction(fun() -> deregister1(Fsm, RC, Reg) end) of
 				{atomic, ok} ->
 					?LOG_NOTICE("Routing keys deregistered",
 							#{layer => m3ua, ep => EP, assoc => Assoc,
 							rcs => [RC], reason => 'M-RK_DEREG'}),
+					report_removed([RC], EP, Assoc),
 					gen_server:cast(From, {'M-RK_DEREG', confirm, Ref, ok}),
 					NewStateData = deregistered([RC], RKs, StateData#statedata{
 							rks = lists:keydelete(RC, 1, RKs),
@@ -1790,13 +1799,14 @@ deregister(Reason, #statedata{registered = RCs, rks = RKs,
 		ep = EP, assoc = Assoc} = StateData) ->
 	Fsm = self(),
 	F = fun() ->
-			lists:foreach(fun(RC) -> deregister1(Fsm, RC) end, RCs)
+			lists:foreach(fun(RC) -> deregister1(Fsm, RC, true) end, RCs)
 	end,
 	case mnesia:transaction(F) of
 		{atomic, ok} ->
 			?LOG_NOTICE("Routing keys deregistered",
 					#{layer => m3ua, ep => EP, assoc => Assoc,
 					rcs => RCs, reason => Reason}),
+			report_removed(RCs, EP, Assoc),
 			NewRKs = [RK || {RC, _, _} = RK <- RKs,
 					not lists:member(RC, RCs)],
 			deregistered(RCs, RKs,
@@ -1836,7 +1846,8 @@ dereg_request(RCs, StateName,
 		_ ->
 			?LOG_NOTICE("Routing keys deregistered",
 					#{layer => m3ua, ep => EP, assoc => Assoc,
-					rcs => Deregistered, reason => dereg_req})
+					rcs => Deregistered, reason => dereg_req}),
+			report_removed(Deregistered, EP, Assoc)
 	end,
 	Frefused = fun({_RC, deregistered}) ->
 				ok;
@@ -1888,7 +1899,7 @@ dereg_request1(Fsm, RC, Registered) ->
 					%% asp's to give up.
 					case lists:member(RC, Registered) of
 						true ->
-							ok = deregister1(Fsm, RC),
+							ok = deregister1(Fsm, RC, true),
 							deregistered;
 						false ->
 							permission_denied
@@ -1897,19 +1908,24 @@ dereg_request1(Fsm, RC, Registered) ->
 	end.
 
 %% @hidden
-deregister1(Fsm, RC) ->
+deregister1(Fsm, RC, Registered) ->
 	case mnesia:read(m3ua_as, RC, write) of
 		[#m3ua_as{asp = ASPs} = AS] ->
 			NewASPs = lists:keydelete(Fsm, #m3ua_as_asp.fsm, ASPs),
-			%% An application server with no asp left up is down.
-			NewAS = case [A || #m3ua_as_asp{state = S} = A <- NewASPs,
-					S /= down] of
-				[] ->
-					AS#m3ua_as{asp = NewASPs, state = down};
-				_ ->
-					AS#m3ua_as{asp = NewASPs}
-			end,
-			ok = mnesia:write(NewAS);
+			case removable(NewASPs, Registered, AS) of
+				true ->
+					ok = mnesia:delete(m3ua_as, RC, write);
+				false ->
+					%% An application server with no asp left up is down.
+					NewAS = case [A || #m3ua_as_asp{state = S} = A <- NewASPs,
+							S /= down] of
+						[] ->
+							AS#m3ua_as{asp = NewASPs, state = down};
+						_ ->
+							AS#m3ua_as{asp = NewASPs}
+					end,
+					ok = mnesia:write(NewAS)
+			end;
 		[] ->
 			ok
 	end,
@@ -2000,6 +2016,31 @@ deregister_cb(CbMod, CbArgs, CbState, EP, Assoc) when is_atom(CbMod) ->
 	end;
 deregister_cb(#m3ua_fsm_cb{} = CbMod, CbArgs, _CbState, _EP, _Assoc) ->
 	m3ua_callback:cb(deregister, CbMod, CbArgs).
+
+%% @hidden
+%% 	RFC4666, Section-4.4.2: "If a Deregistration results in no more ASPs
+%% 	in an Application Server, an SG MAY delete the Routing Key data."
+%% 	This one does for an application server a REG REQ brought into
+%% 	being, left by the last asp that registered into it -- and for no
+%% 	other. One layer management configured has a name (m3ua:as_add/7);
+%% 	one reg_request1/3 made for a routing key it had not seen has none,
+%% 	and no other record is kept of how it came to be, short of a field
+%% 	the table schema does not have.
+removable([], true, #m3ua_as{name = undefined}) ->
+	true;
+removable(_ASPs, _Registered, #m3ua_as{}) ->
+	false.
+
+%% @hidden
+report_removed(RCs, EP, Assoc) ->
+	case [RC || RC <- RCs, mnesia:dirty_read(m3ua_as, RC) == []] of
+		[] ->
+			ok;
+		Removed ->
+			?LOG_NOTICE("Application servers removed",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					rcs => Removed, reason => no_asp_left})
+	end.
 
 %% @hidden
 update_rks(RC, RK, AsState, RKs) ->
