@@ -98,7 +98,7 @@ sequences() ->
 %%
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
-			connect_options, stop_endpoint,
+			connect_options, stop_endpoint, lm_stray,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
@@ -774,6 +774,18 @@ stop_endpoint(_Config) ->
 	ok = m3ua:stop(EP2),
 	[] = named(Name2),
 	ok = gen_sctp:close(Peer).
+
+lm_stray() ->
+	[{userdata, [{doc, "The layer manager survives a call, cast or message it has no clause for."}]}].
+
+lm_stray(_Config) ->
+	LM = whereis(m3ua),
+	{error, unexpected_request} = gen_server:call(m3ua, no_such_request),
+	ok = gen_server:cast(m3ua, no_such_request),
+	m3ua ! no_such_message,
+	%% A call is answered only after what was sent before it.
+	{error, unexpected_request} = gen_server:call(m3ua, no_such_request),
+	LM = whereis(m3ua).
 
 %% @hidden
 %% 	The endpoints started with `Name'. One stopping meanwhile answers

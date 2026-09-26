@@ -459,7 +459,10 @@ handle_call({getcount, EndPoint, Assoc}, _From,
 			end;
 		none ->
 			{reply, {error, not_found}, State}
-	end.
+	end;
+handle_call(Request, From, State) ->
+	stray(call, Request, From),
+	{reply, {error, unexpected_request}, State}.
 
 -spec handle_cast(Request :: term(), State :: #state{}) ->
 	{noreply, NewState :: #state{}}
@@ -593,7 +596,10 @@ handle_cast({AspOp, confirm, Ref, Result},
 					#{layer => m3ua, ref => Ref, op => AspOp,
 					reason => no_request_outstanding}),
 			{noreply, State}
-	end.
+	end;
+handle_cast(Request, State) ->
+	stray(cast, Request, undefined),
+	{noreply, State}.
 
 -spec handle_info(Info :: timeout | term(), State::#state{}) ->
 	{noreply, NewState :: #state{}}
@@ -654,7 +660,10 @@ handle_info({'EXIT', Pid, _Reason},
 					NewState = State#state{fsms = NewFsms},
 					{noreply, NewState}
 			end
-	end.
+	end;
+handle_info(Info, State) ->
+	stray(info, Info, undefined),
+	{noreply, State}.
 
 -spec terminate(Reason :: normal | shutdown | {shutdown, term()} | term(),
 		State::#state{}) ->
@@ -687,6 +696,16 @@ code_change(_OldVsn, State, _Extra) ->
 %%----------------------------------------------------------------------
 %%  internal functions
 %%----------------------------------------------------------------------
+
+%% @hidden
+%% 	Something this process has no clause for. It is dropped, and said
+%% 	at warning because it is a fault somewhere: this process is linked
+%% 	to every endpoint and association and sits under a one_for_all
+%% 	supervisor, so dying of it would take all of them down with it.
+stray(Kind, Message, From) ->
+	?LOG_WARNING("Message discarded",
+			#{layer => m3ua, kind => Kind, message => Message,
+			from => From, reason => unexpected_message}).
 
 %% @hidden
 stop_ep(EPSupSup, EP) ->
