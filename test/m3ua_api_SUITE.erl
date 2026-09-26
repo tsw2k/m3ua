@@ -99,7 +99,7 @@ sequences() ->
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
 			connect_options, stop_endpoint, lm_stray, reconnect_in_place,
-			endpoint_gives_up,
+			endpoint_gives_up, lm_restart,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
@@ -832,6 +832,55 @@ endpoint_gives_up(_Config) ->
 	true = lists:member(Other, m3ua:get_ep()),
 	LM = whereis(m3ua),
 	ok = m3ua:stop(Other).
+
+lm_restart() ->
+	[{userdata, [{doc, "The layer manager restarts alone: endpoints and associations stay up, and the new one knows them."}]}].
+
+lm_restart(_Config) ->
+	{Peer, _PeerAssoc, EP, Assoc} = raw_sg(),
+	LM = whereis(m3ua),
+	exit(LM, kill),
+	LM2 = new_lm(LM, 40),
+	true = is_pid(LM2),
+	%% The new manager has the association again, from its own record:
+	%% getcount/2 goes through it.
+	{ok, _} = counted(EP, Assoc, 40),
+	true = is_process_alive(EP),
+	%% And the association was never touched.
+	ok = receive
+		{sctp, Peer, _, _, {_, #sctp_assoc_change{state = State}}}
+				when State /= comm_up ->
+			{association, State}
+	after
+		0 ->
+			ok
+	end,
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+%% @hidden
+new_lm(_LM, 0) ->
+	undefined;
+new_lm(LM, N) ->
+	case whereis(m3ua) of
+		LM2 when is_pid(LM2), LM2 /= LM ->
+			LM2;
+		_ ->
+			timer:sleep(50),
+			new_lm(LM, N - 1)
+	end.
+
+%% @hidden
+counted(EP, Assoc, 0) ->
+	m3ua:getcount(EP, Assoc);
+counted(EP, Assoc, N) ->
+	case catch m3ua:getcount(EP, Assoc) of
+		{ok, Counts} ->
+			{ok, Counts};
+		_ ->
+			timer:sleep(50),
+			counted(EP, Assoc, N - 1)
+	end.
 
 %% @hidden
 %% 	The endpoints started with `Name'. One stopping or restarting

@@ -40,7 +40,7 @@
 		{sup :: undefined | pid(),
 		ep_sup_sup :: undefined | pid(),
 		eps = gb_trees:empty() :: gb_trees:tree(EP :: pid(),
-				USAP :: pid()),
+				USAP :: pid() | undefined),
 		fsms = gb_trees:empty() :: gb_trees:tree(EP :: pid(),
 				Assoc :: gen_sctp:assoc_id()),
 		reqs = gb_trees:empty() :: gb_trees:tree(Ref :: reference(),
@@ -579,7 +579,9 @@ handle_cast({RkOp, confirm, Ref, Result},
 	end;
 handle_cast({'M-SCTP_ESTABLISH', indication, Fsm, EP, Assoc},
 		#state{fsms = Fsms} = State) ->
-	NewFsms = gb_trees:insert({EP, Assoc}, Fsm, Fsms),
+	%% An association announces itself when it comes up and again when
+	%% this process is new (adopt/1), and the two can cross.
+	NewFsms = gb_trees:enter({EP, Assoc}, Fsm, Fsms),
 	link(Fsm),
 	{noreply, State#state{fsms = NewFsms}};
 handle_cast({AspOp, confirm, Ref, Result},
@@ -737,5 +739,47 @@ stop_ep(EPSupSup, EP) ->
 get_sups(#state{sup = TopSup, ep_sup_sup = undefined} = State) ->
 	Siblings = supervisor:which_children(TopSup),
 	{_, EPSupSup, _, _} = lists:keyfind(m3ua_endpoint_sup_sup, 1, Siblings),
-	State#state{ep_sup_sup = EPSupSup}.
+	adopt(State#state{ep_sup_sup = EPSupSup}).
+
+%% @hidden
+%% 	Take on what an earlier instance of this process left running.
+%% 	m3ua_sup restarts this process on its own, so the endpoints and
+%% 	their associations are still up; only the record of them here is
+%% 	new and empty. Link each endpoint again, and have each association
+%% 	announce itself again as it did when it came up. On the first
+%% 	start there is nothing to find.
+adopt(#state{ep_sup_sup = EPSupSup, eps = EPs} = State) ->
+	Children = fun(Sup) ->
+			try supervisor:which_children(Sup)
+			catch
+				exit:_ ->
+					[]
+			end
+	end,
+	Fchild = fun({Mod, EP, _, _}, {EPs1, N}) when is_pid(EP),
+					(Mod == m3ua_listen_fsm orelse Mod == m3ua_connect_fsm) ->
+				link(EP),
+				{gb_trees:enter(EP, undefined, EPs1), N};
+			({Mod, FsmSup, _, _}, {EPs1, N}) when is_pid(FsmSup),
+					(Mod == m3ua_asp_sup orelse Mod == m3ua_sgp_sup) ->
+				Fsms = [Fsm || {_, Fsm, _, _} <- Children(FsmSup), is_pid(Fsm)],
+				[gen_fsm:send_all_state_event(Fsm, 'M-LM_ADOPT') || Fsm <- Fsms],
+				{EPs1, N + length(Fsms)};
+			(_, Acc) ->
+				Acc
+	end,
+	Fsup = fun({_, EndPointSup, _, _}, Acc) when is_pid(EndPointSup) ->
+				lists:foldl(Fchild, Acc, Children(EndPointSup));
+			(_, Acc) ->
+				Acc
+	end,
+	{NewEPs, NumFsms} = lists:foldl(Fsup, {EPs, 0}, Children(EPSupSup)),
+	case gb_trees:size(NewEPs) of
+		0 ->
+			ok;
+		NumEPs ->
+			?LOG_NOTICE("Layer manager took on running endpoints",
+					#{layer => m3ua, eps => NumEPs, assocs => NumFsms})
+	end,
+	State#state{eps = NewEPs}.
 

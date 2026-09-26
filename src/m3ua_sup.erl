@@ -36,9 +36,14 @@
 %% @private
 %%
 init([] = _Args) ->
+	%% `one_for_one': the layer manager and the endpoints fail apart.
+	%% Under `one_for_all' the manager's death took every endpoint with
+	%% it, and the endpoint supervisor came back empty. The endpoints
+	%% carry the traffic and do not need the manager to go on doing it;
+	%% a new manager finds them again (m3ua_lm_server:adopt/1).
 	ChildSpecs = [server(m3ua_lm_server, [self()]),
 			supervisor(m3ua_endpoint_sup_sup, [])],
-	{ok, {{one_for_all, 1, 5}, ChildSpecs}}.
+	{ok, {{one_for_one, 5, 10}, ChildSpecs}}.
 
 %%----------------------------------------------------------------------
 %%  internal functions

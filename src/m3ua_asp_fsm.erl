@@ -295,7 +295,8 @@
 		callback :: atom() | #m3ua_fsm_cb{},
 		cb_opts :: term(),
 		cb_state :: term(),
-		count = #{} :: #{atom() => non_neg_integer()}}).
+		count = #{} :: #{atom() => non_neg_integer()},
+		lm :: undefined | pid()}).
 
 -define(Tack, 2000).
 
@@ -505,7 +506,7 @@ down(timeout, #statedata{ep = EP, assoc = Assoc, receiver = undefined,
 	Receiver = m3ua_receiver:start(Socket, self(), Active),
 	{ok, NewCbState} = m3ua_callback:cb(asp_down, CbMod, [CbState]),
 	{next_state, down, StateData#statedata{cb_state = NewCbState,
-			receiver = Receiver}};
+			receiver = Receiver, lm = whereis(m3ua)}};
 down({'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
 	handle_dereg(Event, down, StateData);
 down({'M-ASP_UP', request, Ref, From},
@@ -846,6 +847,17 @@ active({'MTP-TRANSFER', request, {Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
 %% @see //stdlib/gen_fsm:handle_event/3
 %% @private
 %%
+handle_event('M-LM_ADOPT', StateName,
+		#statedata{receiver = undefined} = StateData) ->
+	%% Not announced yet: down(timeout, ...) will do it, and this event
+	%% has just cancelled the zero timeout that gets there.
+	{next_state, StateName, StateData, 0};
+handle_event('M-LM_ADOPT', StateName,
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	%% A new layer manager, finding this association running; see
+	%% m3ua_lm_server:adopt/1.
+	gen_server:cast(m3ua, {'M-SCTP_ESTABLISH', indication, self(), EP, Assoc}),
+	{next_state, StateName, StateData#statedata{lm = whereis(m3ua)}};
 handle_event({'M-SCTP_RELEASE', request, Ref, From}, _StateName,
 		#statedata{ep = EP, assoc = Assoc, socket = Socket} = StateData)
 		when Socket /= undefined ->
@@ -989,6 +1001,12 @@ handle_info({'EXIT', Receiver, Reason}, _StateName,
 	%% machine's only ear, so its exit ends the association rather than
 	%% leaving one that is up and hears nothing.
 	{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData};
+handle_info({'EXIT', LM, _Reason}, StateName,
+		#statedata{lm = LM} = StateData) when is_pid(LM) ->
+	%% The layer manager links every association, and m3ua_sup restarts
+	%% it on its own. Its successor asks for this one (M-LM_ADOPT); its
+	%% death is no reason for the association to end.
+	{next_state, StateName, StateData};
 handle_info(Info, StateName, #statedata{receiver = Receiver, socket = _Socket,
 		ep = EP, assoc = Assoc, callback = CbMod,
 		cb_state = CbState} = StateData) ->

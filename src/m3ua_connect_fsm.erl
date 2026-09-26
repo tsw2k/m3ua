@@ -319,7 +319,16 @@ handle_info({'EXIT', Fsm, Reason}, _StateName,
 handle_info({'EXIT', Fsm, Reason}, _StateName,
 		#statedata{socket = Socket, fsm = Fsm} = StateData) ->
 	m3ua_sctp:close(Socket),
-	{stop, Reason, StateData}.
+	{stop, Reason, StateData};
+%% What is left linked is the layer manager, which m3ua_sup restarts on
+%% its own and whose successor links this endpoint again. Its death is
+%% no reason for the endpoint to die. Waiting to try again, the wait is
+%% asked for again: gen_fsm cancels it on any message at all.
+handle_info({'EXIT', _Pid, _Reason}, connecting,
+		#statedata{socket = undefined} = StateData) ->
+	{next_state, connecting, StateData, ?RETRY_WAIT};
+handle_info({'EXIT', _Pid, _Reason}, StateName, StateData) ->
+	{next_state, StateName, StateData}.
 
 -spec terminate(Reason :: normal | shutdown | {shutdown, term()} | term(),
 		StateName :: atom(), StateData :: #statedata{}) ->
