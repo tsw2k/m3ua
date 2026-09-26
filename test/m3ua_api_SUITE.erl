@@ -106,6 +106,7 @@ all() ->
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
+			sgp_transfer_rc,
 			sgp_deregister_local, sgp_deregister_named, asp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
@@ -543,6 +544,31 @@ sgp_dereg_req(_Config) ->
 	%% The application server its REG REQ made went with it (4.4.2).
 	[{RC1, invalid_rc}] = raw_dereg(Peer, PeerAssoc, [RC1]),
 	{ok, #{dereg_in := 3, dereg_rsp_out := 3}} = m3ua:getcount(EP, Assoc),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+sgp_transfer_rc() ->
+	[{userdata, [{doc, "A signalling gateway names the routing context its routing key matches, after the application server has changed state as well as before."}]}].
+
+sgp_transfer_rc(_Config) ->
+	Ref = make_ref(),
+	{Peer, PeerAssoc, EP, _Assoc} = raw_asp(sgp_cb(Ref)),
+	Sgp = wait(Ref),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	DPC = rand:uniform(16383),
+	OPC = rand:uniform(16383),
+	RC = raw_register(Peer, PeerAssoc, undefined, [{DPC, [], []}]),
+	%% ASPAC makes the application server active, and the NTFY that
+	%% says so used to take the routing key with it: a DATA sent after
+	%% it named no routing context, and deregistering crashed the sgp.
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPAC)),
+	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPACACK),
+	ok = m3ua:transfer(Sgp, 1, undefined, OPC, DPC, 0, 3, 0, <<"sgp">>),
+	#m3ua{params = Params} = raw_expect(Peer,
+			?TransferMessage, ?TransferMessageData),
+	[RC] = m3ua_codec:fetch_parameter(?RoutingContext,
+			m3ua_codec:parameters(Params)),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 

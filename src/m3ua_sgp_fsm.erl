@@ -2002,9 +2002,11 @@ report_removed(RCs, EP, Assoc) ->
 	end.
 
 %% @hidden
+%% 	`RK' undefined is a change of state alone (M-NOTIFY), which keeps
+%% 	the routing key already held, whatever the state was before.
 update_rks(RC, RK, AsState, RKs) ->
 	case lists:keytake(RC, 1, RKs) of
-		{value, {RC, RK1, AsState}, RKs1} when RK == undefined ->
+		{value, {RC, RK1, _OldState}, RKs1} when RK == undefined ->
 			[{RC, RK1, AsState} | RKs1];
 		{value, _, RKs1} ->
 			[{RC, RK, AsState} | RKs1];
