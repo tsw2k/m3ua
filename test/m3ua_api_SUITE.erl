@@ -1913,12 +1913,17 @@ as_state_down(_Config) ->
 			[ClientEP2, Assoc2, undefined, NA, Keys, Mode]),
 	{ok, _RC3} = rpc:call(AsNode, m3ua, register,
 			[ClientEP3, Assoc3, undefined, NA, Keys, Mode]),
+	%% ASP DOWN deregisters what each registered (RFC 4666 4.3.4.2), so
+	%% the first two leave the application server as they go, and only
+	%% the last is in it to be told that it is down. The server was
+	%% configured, so it stays, with no asp in it.
 	ok = rpc:call(AsNode, m3ua, asp_down, [ClientEP1, Assoc1]),
 	ok = rpc:call(AsNode, m3ua, asp_down, [ClientEP2, Assoc2]),
 	ok = rpc:call(AsNode, m3ua, asp_down, [ClientEP3, Assoc3]),
-	{_, as_inactive} = wait(RefC1),
-	{_, as_inactive} = wait(RefC2),
 	{_, as_inactive} = wait(RefC3),
+	[#m3ua_as{state = down, asp = []}] = mnesia:dirty_read(m3ua_as, RC),
+	nothing = receive {RefC1, _, _} -> RefC1 after 1000 -> nothing end,
+	nothing = receive {RefC2, _, _} -> RefC2 after 0 -> nothing end,
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP1]),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP2]),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP3]),
