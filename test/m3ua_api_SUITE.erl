@@ -2003,7 +2003,7 @@ ssnm_pause_resume(_Config) ->
 	APC = rand:uniform(16383),
 	ok = m3ua:duna(Sgp, [RC], [APC]),
 	receive
-		{RefC, pause, _, [[APC]]} ->
+		{RefC, pause, _, [APC]} ->
 			ok
 	after
 		4000 ->
@@ -2011,7 +2011,7 @@ ssnm_pause_resume(_Config) ->
 	end,
 	ok = m3ua:dava(Sgp, [RC], [APC]),
 	receive
-		{RefC, resume, _, [[APC]]} ->
+		{RefC, resume, _, [APC]} ->
 			ok
 	after
 		4000 ->
@@ -2055,7 +2055,7 @@ ssnm_audit(_Config) ->
 	APC = rand:uniform(16383),
 	ok = rpc:call(AsNode, m3ua, daud, [Asp, [RC], [APC]]),
 	receive
-		{RefS, audit, _, [[APC]]} ->
+		{RefS, audit, _, [APC]} ->
 			ok
 	after
 		4000 ->
@@ -2064,7 +2064,7 @@ ssnm_audit(_Config) ->
 	%% The gateway answers, which is the whole point of being asked.
 	ok = m3ua:dava(Sgp, [RC], [APC]),
 	receive
-		{RefC, resume, _, [[APC]]} ->
+		{RefC, resume, _, [APC]} ->
 			ok
 	after
 		4000 ->
