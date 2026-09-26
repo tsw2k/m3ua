@@ -98,6 +98,7 @@ sequences() ->
 %%
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
+			connect_options,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
@@ -720,6 +721,41 @@ raw_get(Peer) ->
 	after
 		1000 ->
 			nothing_sent
+	end.
+
+connect_options() ->
+	[{userdata, [{doc, "The options given with connect reach the socket."}]}].
+
+connect_options(_Config) ->
+	%% One the socket can take: the association comes up.
+	{ok, Peer1} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	ok = gen_sctp:listen(Peer1, true),
+	{ok, {_, Port1}} = inet:sockname(Peer1),
+	{ok, EP1} = m3ua:start(callback(make_ref()), 0, [{role, asp},
+			{connect, {127,0,0,1}, Port1, [{sctp_nodelay, true}]}]),
+	ok = comm_up(Peer1),
+	ok = m3ua:stop(EP1),
+	ok = gen_sctp:close(Peer1),
+	%% One it cannot: no association is asked for. These options used
+	%% to be dropped unread, and the association came up regardless.
+	{ok, Peer2} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	ok = gen_sctp:listen(Peer2, true),
+	{ok, {_, Port2}} = inet:sockname(Peer2),
+	{ok, EP2} = m3ua:start(callback(make_ref()), 0, [{role, asp},
+			{connect, {127,0,0,1}, Port2, [{no_such_option, true}]}]),
+	no_association = comm_up(Peer2),
+	%% Stopped while it has no socket at all.
+	ok = m3ua:stop(EP2),
+	ok = gen_sctp:close(Peer2).
+
+%% @hidden
+comm_up(Peer) ->
+	receive
+		{sctp, Peer, _, _, {_, #sctp_assoc_change{state = comm_up}}} ->
+			ok
+	after
+		2000 ->
+			no_association
 	end.
 
 %% @hidden

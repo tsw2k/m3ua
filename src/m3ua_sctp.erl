@@ -180,7 +180,19 @@ close(Socket) ->
 %%
 %% 	The answer arrives as an `#sctp_assoc_change{}' like it always
 %% 	did. `einprogress' is that answer and not a fault.
-connect_init(Socket, Address, Port, _Options) ->
+%%
+%% 	`Options' are set on the socket first, as gen_sctp:connect_init/4
+%% 	set them, and by the same rule as open/1: one this cannot set is
+%% 	an error naming it, and no association is asked for.
+connect_init(Socket, Address, Port, Options) when is_list(Options) ->
+	case setopts(Socket, Options) of
+		ok ->
+			connect_init1(Socket, Address, Port);
+		{error, Reason} ->
+			{error, Reason}
+	end.
+%% @hidden
+connect_init1(Socket, Address, Port) ->
 	case socket:setopt_native(Socket,
 			{?SOL_SCTP, ?SCTP_SOCKOPT_CONNECTX}, sockaddr(Address, Port)) of
 		ok ->
