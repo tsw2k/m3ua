@@ -320,14 +320,33 @@ accept(Socket, Address, Port,
 							NewStateData = StateData#statedata{fsms = NewFsms},
 							{next_state, listening, NewStateData};
 						{error, Reason} ->
-							{stop, Reason, StateData}
+							_ = supervisor:terminate_child(Sup, Fsm),
+							_ = m3ua_sctp:close(NewSocket),
+							not_accepted(controlling_process, Reason,
+									Assoc, Address, Port, StateData)
 					end;
 				{error, Reason} ->
-					{stop, Reason, StateData}
+					_ = m3ua_sctp:close(NewSocket),
+					not_accepted(start_child, Reason,
+							Assoc, Address, Port, StateData)
 			end;
 		{error, Reason} ->
-			{stop, Reason, StateData}
+			not_accepted(peeloff, Reason, Assoc, Address, Port, StateData)
 	end.
+
+%% @hidden
+%% 	One association that could not be taken on is that association's
+%% 	loss, not the endpoint's. This used to stop the listening endpoint,
+%% 	and with it every association already running on it: seen once in
+%% 	four runs under load, `closed' from handing the new socket to a
+%% 	state machine that had already gone.
+not_accepted(Stage, Reason, Assoc, Address, Port,
+		#statedata{receiver = Receiver} = StateData) ->
+	?LOG_WARNING("Association not accepted",
+			#{layer => m3ua, ep => self(), assoc => Assoc,
+			peer => {Address, Port}, stage => Stage, reason => Reason}),
+	m3ua_receiver:replenish(Receiver, once),
+	{next_state, listening, StateData}.
 
 %% @hidden
 %% The kernel's buffers unless the caller named its own; see the note

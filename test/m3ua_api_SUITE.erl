@@ -99,6 +99,7 @@ sequences() ->
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
 			connect_options, stop_endpoint, lm_stray, reconnect_in_place,
+			listen_not_accepted,
 			endpoint_gives_up, lm_restart, callback_raised, asp_up_ack_unexpected,
 			asp_drst_dupu,
 			undecodable, unexpected, registration_results, ack_timeout,
@@ -1099,6 +1100,48 @@ asp_drst_dupu(_Config) ->
 	{ok, #{drst_in := 1, dupu_in := 1}} = m3ua:getcount(EP, Assoc),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+listen_not_accepted() ->
+	[{userdata, [{doc, "An association a listening endpoint cannot take on costs that association, not the endpoint."}]}].
+
+listen_not_accepted(_Config) ->
+	%% The callback refuses while this process is registered under
+	%% the name; the first association is refused that way.
+	Finit = fun(_Module, _Fsm, _EP, _EpName, _Assoc, _Options, _Pid) ->
+				case whereis(m3ua_api_refuse) of
+					undefined ->
+						{ok, once, []};
+					_ ->
+						{error, refused}
+				end
+	end,
+	Callback = (callback(make_ref()))#m3ua_fsm_cb{init = Finit},
+	{ok, EP} = m3ua:start(Callback, 0, [{role, sgp}, {ip, {127,0,0,1}}]),
+	{_, server, sgp, {_, Port}} = m3ua:get_ep(EP),
+	true = register(m3ua_api_refuse, self()),
+	{ok, Peer1} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	{ok, #sctp_assoc_change{state = comm_up}} =
+			gen_sctp:connect(Peer1, {127,0,0,1}, Port, []),
+	ok = receive
+		{sctp, Peer1, _, _, {_, #sctp_assoc_change{state = State}}}
+				when State /= comm_up ->
+			ok
+	after
+		4000 ->
+			still_up
+	end,
+	true = unregister(m3ua_api_refuse),
+	%% The endpoint is the same, and takes the next one.
+	true = is_process_alive(EP),
+	{ok, Peer2} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	{ok, #sctp_assoc_change{state = comm_up, assoc_id = PeerAssoc}} =
+			gen_sctp:connect(Peer2, {127,0,0,1}, Port, []),
+	[_] = assoc(EP, 40),
+	ok = raw_put(Peer2, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+	#m3ua{} = raw_expect(Peer2, ?ASPSMMessage, ?ASPSMASPUPACK),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer1),
+	ok = gen_sctp:close(Peer2).
 
 %% @hidden
 %% 	The endpoints started with `Name'. One stopping or restarting
