@@ -30,6 +30,7 @@
 
 -include("m3ua.hrl").
 -include_lib("kernel/include/inet_sctp.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -spec content_types_accepted() -> ContentTypes
 	when
@@ -73,8 +74,8 @@ as_state({ok, AS}) ->
 			"# TYPE stc_m3ua_as_state gauge\n"],
 	as_state(AS, [HELP]);
 as_state({error, Reason}) ->
-	error_logger:error_report(["Failed to get application servers",
-			{module, ?MODULE}, {error, Reason}]),
+	?LOG_WARNING("Failed to get application servers",
+			#{layer => m3ua, reason => Reason}),
 	[].
 %% @hidden
 as_state([{Name, _, _, _, _, _, _, State} | T], Acc) ->
@@ -125,8 +126,8 @@ asp_state(Assocs) when is_list(Assocs) ->
 			"# TYPE stc_m3ua_asp_state gauge\n"],
 	asp_state(Assocs, [HELP]);
 asp_state({'EXIT', Reason}) ->
-	error_logger:error_report(["Failed to get associations",
-			{module, ?MODULE}, {error, Reason}]),
+	?LOG_WARNING("Failed to get associations",
+			#{layer => m3ua, reason => Reason}),
 	[].
 %% @hidden
 asp_state([{EP, Assoc} | T], Acc) ->
@@ -136,8 +137,8 @@ asp_state([{EP, Assoc} | T], Acc) ->
 			Role = atom_to_list(element(3, EndPoint)),
 			asp_state1(Name, Role, catch m3ua:asp_status(EP, Assoc), Acc);
 		{'EXIT', Reason} ->
-			error_logger:error_report(["Failed to get endpoint",
-					{module, ?MODULE}, {error, Reason}]),
+			?LOG_WARNING("Failed to get endpoint",
+					#{layer => m3ua, reason => Reason}),
 			[]
 	end,
 	asp_state(T, NewAcc);
@@ -152,8 +153,8 @@ asp_state1(Name, Role, State, Acc) when is_atom(State) ->
 			asp_state2(NameS, Role, State, Acc)
 	end;
 asp_state1(_Name, _, {'EXIT', Reason}, _) ->
-	error_logger:error_report(["Failed to get ASP status",
-			{module, ?MODULE}, {error, Reason}]),
+	?LOG_WARNING("Failed to get ASP status",
+			#{layer => m3ua, reason => Reason}),
 	[].
 %% @hidden
 asp_state2(Name, Role, down, Acc) ->
@@ -192,8 +193,8 @@ sctp_state(Assocs) when is_list(Assocs) ->
 			"# TYPE stc_m3ua_sctp_state gauge\n"],
 	sctp_state(Assocs, [HELP]);
 sctp_state({'EXIT', Reason}) ->
-	error_logger:error_report(["Failed to get associations",
-			{module, ?MODULE}, {error, Reason}]),
+	?LOG_WARNING("Failed to get associations",
+			#{layer => m3ua, reason => Reason}),
 	[].
 %% @hidden
 sctp_state([{EP, Assoc} | T], Acc) ->
@@ -203,8 +204,8 @@ sctp_state([{EP, Assoc} | T], Acc) ->
 			Role = atom_to_list(element(2, EndPoint)),
 			sctp_state1(Name, Role, m3ua:sctp_status(EP, Assoc), Acc);
 		{'EXIT', Reason} ->
-			error_logger:error_report(["Failed to get endpoint",
-					{module, ?MODULE}, {error, Reason}]),
+			?LOG_WARNING("Failed to get endpoint",
+					#{layer => m3ua, reason => Reason}),
 			[]
 	end,
 	sctp_state(T, NewAcc);
@@ -219,8 +220,8 @@ sctp_state1(Name, Role, {ok, #sctp_status{state = State}}, Acc) ->
 			sctp_state2(NameS, Role, State, Acc)
 	end;
 sctp_state1(_Name, _, {error, Reason}, _) ->
-	error_logger:error_report(["Failed to get SCTP status",
-			{module, ?MODULE}, {error, Reason}]),
+	?LOG_WARNING("Failed to get SCTP status",
+			#{layer => m3ua, reason => Reason}),
 	[].
 %% @hidden
 sctp_state2(Name, Role, closed, Acc) ->
@@ -372,8 +373,8 @@ asp_count(Assocs) when is_list(Assocs) ->
 			"# TYPE stc_m3ua_message_total counter\n"],
 	asp_count(Assocs, [HELP]);
 asp_count({'EXIT', Reason}) ->
-	error_logger:error_report(["Failed to get associations",
-			{module, ?MODULE}, {error, Reason}]),
+	?LOG_WARNING("Failed to get associations",
+			#{layer => m3ua, reason => Reason}),
 	[].
 %% @hidden
 asp_count([{EP, Assoc} | T], Acc) ->
@@ -383,8 +384,8 @@ asp_count([{EP, Assoc} | T], Acc) ->
 			Role = atom_to_list(element(3, EndPoint)),
 			asp_count1(Name, Role, m3ua:getcount(EP, Assoc), Acc);
 		{'EXIT', Reason} ->
-			error_logger:error_report(["Failed to get endpoint",
-					{module, ?MODULE}, {error, Reason}]),
+			?LOG_WARNING("Failed to get endpoint",
+					#{layer => m3ua, reason => Reason}),
 			[]
 	end,
 	asp_count(T, NewAcc);
@@ -399,8 +400,8 @@ asp_count1(Name, Role, {ok, Count}, Acc) ->
 			asp_count2(NameS, Role, Count, Acc)
 	end;
 asp_count1(_Name, _, {error, Reason}, _) ->
-	error_logger:error_report(["Failed to get ASP statistics",
-			{module, ?MODULE}, {error, Reason}]),
+	?LOG_WARNING("Failed to get ASP statistics",
+			#{layer => m3ua, reason => Reason}),
 	[].
 %% @hidden
 asp_count2(Name, Role, Count, Acc) ->

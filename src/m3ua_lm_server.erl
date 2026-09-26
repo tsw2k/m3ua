@@ -681,9 +681,10 @@ terminate(shutdown = _Reason, _State) ->
 terminate({shutdown, _} = _Reason, _State) ->
 	ok;
 terminate(Reason, State) ->
-	error_logger:error_report(["Shutdown",
-			{module, ?MODULE}, {pid, self()},
-			{reason, Reason}, {state, State}]).
+	?LOG_ERROR("Layer manager terminated",
+			#{layer => m3ua, reason => Reason}),
+	?LOG_DEBUG("Layer manager terminated",
+			#{layer => m3ua, state => State}).
 
 -spec code_change(OldVsn :: term() | {down, term()}, State :: #state{},
 		Extra :: term()) ->

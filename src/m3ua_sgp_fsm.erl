@@ -841,10 +841,13 @@ handle_info({sctp_error, Socket, PeerAddr, PeerPort,
 		{[], #sctp_send_failed{flags = Flags, error = Error,
 		info = Info, assoc_id = Assoc, data = Data}}},
 		_StateName, #statedata{assoc = Assoc, ep = EP} = StateData) ->
-	error_logger:error_report(["SCTP error",
-		{error, m3ua_sctp:error_string(Error)}, {flags, Flags},
-		{assoc, Assoc}, {info, Info}, {data, Data}, {socket, Socket},
-		{peer, {PeerAddr, PeerPort}}]),
+	?LOG_ERROR("SCTP send failed",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			peer => {PeerAddr, PeerPort}, flags => Flags,
+			reason => m3ua_sctp:error_string(Error)}),
+	?LOG_DEBUG("SCTP send failed",
+			#{layer => m3ua, ep => EP, assoc => Assoc, socket => Socket,
+			info => Info, data => Data}),
 	{stop, {shutdown, {{EP, Assoc}, Error}}, StateData};
 handle_info({'EXIT', EP, {shutdown, {EP, Reason}}}, _StateName,
 		#statedata{ep = EP, assoc = Assoc} = StateData) ->
@@ -891,9 +894,10 @@ terminate(Reason, StateName, #statedata{socket = Socket} = StateData) ->
 		ok ->
 			ok;
 		{error, Reason1} ->
-			error_logger:error_report(["Failed to close socket",
-					{module, ?MODULE}, {socket, Socket},
-					{error, Reason1}, {state, StateData}])
+			?LOG_WARNING("Socket not closed",
+					#{layer => m3ua, ep => StateData#statedata.ep,
+					assoc => StateData#statedata.assoc, socket => Socket,
+					reason => Reason1})
 	end,
 	terminate1(Reason, StateName, StateData).
 %% @hidden
@@ -1399,14 +1403,22 @@ handle_sgp(#m3ua{class = ?SSNMMessage, type = ?SSNMDAUD, params = Params},
 	{next_state, StateName, NewStateData};
 handle_sgp(#m3ua{class = ?MGMTMessage, type = ?MGMTError, params = Params},
 		StateName, _Stream, #statedata{assoc = Assoc, ep = EP,
-		socket = _Socket, receiver = Receiver, active = Active} = StateData) ->
+		socket = _Socket, receiver = Receiver, active = Active,
+		count = Count} = StateData) ->
+	%% The peer found fault with something this end sent, and says no
+	%% more than the code; the diagnostic, if any, goes to debug.
 	Parameters = m3ua_codec:parameters(Params),
 	ErrorCode = proplists:get_value(?ErrorCode, Parameters),
-	error_logger:error_report(["M3UA protocol error",
-			{module, ?MODULE}, {state, StateName}, {endpoint, EP},
-			{association, Assoc}, {error, ErrorCode}]),
+	?LOG_WARNING("ERR received",
+			#{layer => m3ua, ep => EP, assoc => Assoc, state => StateName,
+			reason => ErrorCode}),
+	?LOG_DEBUG("ERR received",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			parameters => Parameters}),
 	ok = m3ua_receiver:replenish(Receiver, Active),
-	{next_state, StateName, StateData};
+	ErrorIn = maps:get(error_in, Count, 0),
+	NewCount = maps:put(error_in, ErrorIn + 1, Count),
+	{next_state, StateName, StateData#statedata{count = NewCount}};
 handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMBEAT, params = Params},
 		StateName, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->

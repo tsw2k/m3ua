@@ -36,6 +36,7 @@
 -define(WAITFORTABLES, 10000).
 
 -include("m3ua.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 %%----------------------------------------------------------------------
 %%  The m3ua_app aplication callbacks
@@ -59,8 +60,8 @@ start(normal = _StartType, _Args) ->
 				ok ->
 					start1();
 				{error, Reason} ->
-					error_logger:error_report(["m3ua application failed to start",
-							{reason, Reason}, {module, ?MODULE}]),
+					?LOG_ERROR("Application not started",
+							#{layer => m3ua, reason => Reason}),
 					{error, Reason}
 			end;
 		{error, Reason} ->
@@ -116,8 +117,8 @@ start3() ->
 		{ok, Sup} ->
 			{ok, Sup};
 		{error, Reason} ->
-			error_logger:error_report(["m3ua application failed to start",
-					{reason, Reason}, {module, ?MODULE}]),
+			?LOG_ERROR("Application not started",
+					#{layer => m3ua, reason => Reason}),
 			{error, Reason}
 	end.
 
@@ -186,17 +187,17 @@ install(Nodes) when is_list(Nodes) ->
 		no ->
 			case mnesia:create_schema(Nodes) of
 				ok ->
-					error_logger:info_report("Created mnesia schema",
-							[{nodes, Nodes}]),
+					?LOG_NOTICE("Created mnesia schema",
+							#{layer => m3ua, nodes => Nodes}),
 					install1(Nodes);
 				{error, {_, {already_exists, _}}} ->
-						error_logger:info_report("mnesia schema already exists",
-						[{nodes, Nodes}]),
+					?LOG_NOTICE("Found existing mnesia schema",
+							#{layer => m3ua, nodes => Nodes}),
 					install1(Nodes);
 				{error, Reason} ->
-					error_logger:error_report(["Failed to create schema",
-							mnesia:error_description(Reason),
-							{nodes, Nodes}, {error, Reason}]),
+					?LOG_ERROR("Mnesia schema not created",
+							#{layer => m3ua, nodes => Nodes, reason => Reason,
+							description => mnesia:error_description(Reason)}),
 					{error, Reason}
 			end;
 		_ ->
@@ -206,11 +207,12 @@ install(Nodes) when is_list(Nodes) ->
 install1([Node] = Nodes) when Node == node() ->
 	case mnesia:start() of
 		ok ->
-			error_logger:info_msg("Started mnesia~n"),
+			?LOG_NOTICE("Started mnesia", #{layer => m3ua}),
 			install2(Nodes);
 		{error, Reason} ->
-			error_logger:error_report([mnesia:error_description(Reason),
-					{error, Reason}]),
+			?LOG_ERROR("Mnesia not started",
+					#{layer => m3ua, reason => Reason,
+					description => mnesia:error_description(Reason)}),
 			{error, Reason}
 	end;
 install1(Nodes) ->
@@ -223,18 +225,18 @@ install1(Nodes) ->
 			end,
 			case lists:filter(F, Results) of
 				[] ->
-					error_logger:info_report(["Started mnesia on all nodes",
-							{nodes, Nodes}]),
+					?LOG_NOTICE("Started mnesia on all nodes",
+							#{layer => m3ua, nodes => Nodes}),
 					install2(Nodes);
 				NotOKs ->
-					error_logger:error_report(["Failed to start mnesia"
-							" on all nodes", {nodes, Nodes}, {errors, NotOKs}]),
+					?LOG_ERROR("Mnesia not started on all nodes",
+							#{layer => m3ua, nodes => Nodes, reason => NotOKs}),
 					{error, NotOKs}
 			end;
 		{Results, BadNodes} ->
-			error_logger:error_report(["Failed to start mnesia"
-					" on all nodes", {nodes, Nodes}, {results, Results},
-					{badnodes, BadNodes}]),
+			?LOG_ERROR("Mnesia not started on all nodes",
+					#{layer => m3ua, nodes => Nodes, results => Results,
+					reason => {badnodes, BadNodes}}),
 			{error, {Results, BadNodes}}
 	end.
 %% @hidden
@@ -243,12 +245,13 @@ install2(Nodes) ->
 		ok ->
 			install3(Nodes, []);
 		{error, Reason} ->
-			error_logger:error_report([mnesia:error_description(Reason),
-				{error, Reason}]),
+			?LOG_ERROR("Mnesia schema not available",
+					#{layer => m3ua, reason => Reason,
+					description => mnesia:error_description(Reason)}),
 			{error, Reason};
 		{timeout, Tables} ->
-			error_logger:error_report(["Timeout waiting for tables",
-					{tables, Tables}]),
+			?LOG_ERROR("Mnesia schema not available",
+					#{layer => m3ua, tables => Tables, reason => timeout}),
 			{error, timeout}
 	end.
 %% @hidden
@@ -258,18 +261,20 @@ install3(Nodes, Tables) ->
 			{attributes, record_info(fields, m3ua_as)},
 			{index, [rk]}]) of
 		{atomic, ok} ->
-			error_logger:info_msg("Created new m3ua_as table.~n"),
+			?LOG_NOTICE("Created table", #{layer => m3ua, table => m3ua_as}),
 			install4(Nodes, [m3ua_as | Tables]);
 		{aborted, {not_active, _, Node} = Reason} ->
-			error_logger:error_report(["Mnesia not started on node",
-					{node, Node}]),
+			?LOG_ERROR("Table not created",
+					#{layer => m3ua, table => m3ua_as, node => Node,
+					reason => not_active}),
 			{error, Reason};
 		{aborted, {already_exists, m3ua_as}} ->
-			error_logger:info_msg("Found existing m3ua_as table.~n"),
+			?LOG_NOTICE("Found existing table", #{layer => m3ua, table => m3ua_as}),
 			install4(Nodes, [m3ua_as | Tables]);
 		{aborted, Reason} ->
-			error_logger:error_report([mnesia:error_description(Reason),
-				{error, Reason}]),
+			?LOG_ERROR("Table not created",
+					#{layer => m3ua, table => m3ua_as, reason => Reason,
+					description => mnesia:error_description(Reason)}),
 			{error, Reason}
 	end.
 %% @hidden
@@ -278,18 +283,20 @@ install4(Nodes, Tables) ->
 			{user_properties, [{m3ua, true}]},
 			{attributes, record_info(fields, m3ua_asp)}]) of
 		{atomic, ok} ->
-			error_logger:info_msg("Created new m3ua_asp table.~n"),
+			?LOG_NOTICE("Created table", #{layer => m3ua, table => m3ua_asp}),
 			{ok, [m3ua_asp | Tables]};
 		{aborted, {not_active, _, Node} = Reason} ->
-			error_logger:error_report(["Mnesia not started on node",
-					{node, Node}]),
+			?LOG_ERROR("Table not created",
+					#{layer => m3ua, table => m3ua_asp, node => Node,
+					reason => not_active}),
 			{error, Reason};
 		{aborted, {already_exists, m3ua_asp}} ->
-			error_logger:info_msg("Found existing m3ua_asp table.~n"),
+			?LOG_NOTICE("Found existing table", #{layer => m3ua, table => m3ua_asp}),
 			{ok, [m3ua_asp | Tables]};
 		{aborted, Reason} ->
-			error_logger:error_report([mnesia:error_description(Reason),
-				{error, Reason}]),
+			?LOG_ERROR("Table not created",
+					#{layer => m3ua, table => m3ua_asp, reason => Reason,
+					description => mnesia:error_description(Reason)}),
 			{error, Reason}
 	end.
 

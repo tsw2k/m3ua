@@ -32,6 +32,7 @@
 
 -include("m3ua.hrl").
 -include_lib("kernel/include/inet_sctp.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -record(statedata,
 		{sup :: undefined | pid(),
@@ -138,8 +139,11 @@ init([Sup, Callback, Opts] = _Args) ->
 		end
 	catch
 		Reason1 ->
-			error_logger:error_report(["Failed to open socket",
-					{module, ?MODULE}, {error, Reason1}, {options, Options}]),
+			?LOG_ERROR("Socket not opened",
+					#{layer => m3ua, ep => self(), name => Name,
+					reason => Reason1}),
+			?LOG_DEBUG("Socket not opened",
+					#{layer => m3ua, ep => self(), options => Options}),
 			{stop, Reason1}
 	end.
 
@@ -223,10 +227,13 @@ handle_info({sctp, _Socket, _PeerAddr, _PeerPort, {_AncData, Event}},
 handle_info({sctp_error, Socket, PeerAddr, PeerPort,
 		{_AncData, #sctp_remote_error{error = Error,
 		assoc_id = Assoc, data = Data}}}, StateName, StateData) ->
-	error_logger:warning_report(["SCTP Remote Error",
-			{error, m3ua_sctp:error_string(Error)},
-			{assoc, Assoc}, {data, Data}, {socket, Socket},
-			{peer, {PeerAddr, PeerPort}}]),
+	?LOG_WARNING("SCTP remote error",
+			#{layer => m3ua, ep => self(), assoc => Assoc,
+			peer => {PeerAddr, PeerPort},
+			reason => m3ua_sctp:error_string(Error)}),
+	?LOG_DEBUG("SCTP remote error",
+			#{layer => m3ua, ep => self(), assoc => Assoc, socket => Socket,
+			data => Data}),
 	{next_state, StateName, StateData};
 handle_info({'EXIT', Receiver, Reason}, _StateName,
 		#statedata{receiver = Receiver} = StateData) ->
@@ -263,9 +270,10 @@ terminate(_Reason, _StateName, #statedata{socket = Socket} = StateData) ->
 		ok ->
 			ok;
 		{error, Reason1} ->
-			error_logger:error_report(["Failed to close socket",
-					{module, ?MODULE}, {socket, Socket},
-					{error, Reason1}, {state, StateData}])
+			?LOG_WARNING("Socket not closed",
+					#{layer => m3ua, ep => self(),
+					name => StateData#statedata.name, socket => Socket,
+					reason => Reason1})
 	end.
 
 -spec code_change(OldVsn :: term() | {down, term()}, StateName :: atom(),

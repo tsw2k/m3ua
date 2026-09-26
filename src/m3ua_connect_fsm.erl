@@ -156,10 +156,13 @@ connecting(timeout, #statedata{options = LocalOptions,
 									local_port = LocalPort},
 							{next_state, connecting, NewStateData};
 						{error, ReasonConnect} ->
-							error_logger:error_report(["Connect failed",
-									{error, ReasonConnect}, {name, Name},
-									{address, RemoteAddress}, {port, RemotePort},
-									{options, ConnectOptions}]),
+							?LOG_WARNING("Connect failed",
+									#{layer => m3ua, ep => self(), name => Name,
+									remote => {RemoteAddress, RemotePort},
+									reason => ReasonConnect}),
+							?LOG_DEBUG("Connect failed",
+									#{layer => m3ua, ep => self(),
+									options => ConnectOptions}),
 							m3ua_sctp:close(Socket),
 							NewStateData = StateData#statedata{socket = undefined,
 									local_addr = undefined,
@@ -167,16 +170,18 @@ connecting(timeout, #statedata{options = LocalOptions,
 							{next_state, connecting, NewStateData, ?ERROR_WAIT}
 					end;
 				{error, ReasonPort} ->
-					error_logger:error_report(["Failed to get port number",
-							{module, ?MODULE}, {error, ReasonPort},
-							{state, StateData}]),
+					?LOG_ERROR("Socket has no local address",
+							#{layer => m3ua, ep => self(), name => Name,
+							reason => ReasonPort}),
 					m3ua_sctp:close(Socket),
 					{stop, ReasonPort}
 			end;
 		{error, ReasonOpen} ->
-			error_logger:error_report(["Failed to open socket",
-					{module, ?MODULE}, {error, ReasonOpen},
-					{options, LocalOptions}, {state, StateData}]),
+			?LOG_ERROR("Socket not opened",
+					#{layer => m3ua, ep => self(), name => Name,
+					reason => ReasonOpen}),
+			?LOG_DEBUG("Socket not opened",
+					#{layer => m3ua, ep => self(), options => LocalOptions}),
 			{stop, ReasonOpen}
 	end;
 connecting({'M-SCTP_RELEASE', request, Ref, From},
@@ -344,9 +349,10 @@ terminate(_Reason, _StateName, #statedata{socket = Socket} = StateData) ->
 		ok ->
 			ok;
 		{error, Reason1} ->
-			error_logger:error_report(["Failed to close socket",
-					{module, ?MODULE}, {socket, Socket},
-					{error, Reason1}, {state, StateData}])
+			?LOG_WARNING("Socket not closed",
+					#{layer => m3ua, ep => self(),
+					name => StateData#statedata.name, socket => Socket,
+					reason => Reason1})
 	end.
 
 -spec code_change(OldVsn :: term() | {down, term()}, StateName :: atom(),

@@ -92,7 +92,8 @@ association:
   contained.
 
 **Counters.** `m3ua:getcount(EndPoint, Assoc)` has, besides upstream's:
-`undecodable_in`, `unexpected_in`, `error_out`, `callback_raised`, and for
+`undecodable_in`, `unexpected_in`, `error_in`, `error_out`, `callback_raised`,
+`drst_in`, `dupu_in`, and for
 deregistration `dereg_out` and `dereg_rsp_in` at an ASP, `dereg_in` and
 `dereg_rsp_out` at a gateway. `transfer_discarded` counts transfers refused
 or dropped for the association's state.
@@ -111,22 +112,22 @@ its reason; `notice` is a state change worth seeing unasked **and every message
 that goes no further** because of the configuration or the peer; `warning` and
 above are faults.
 
-**The traffic path follows it; the rest does not yet.** In `m3ua_asp_fsm`,
-`m3ua_sgp_fsm` and `m3ua_lm_server`:
+Every module reports by it; none uses `error_logger` any more. Among what is
+reported:
 
 - where a message stops and why, at `notice`;
 - once when an association stops and starts carrying traffic;
 - a message from the peer that will not decode, at `warning` with its octets
   at `debug`; one nothing takes in its state, at `notice`;
-- a routing key registration or deregistration refused, and routing keys
-  deregistered, at `notice`;
+- an ERR from the peer, at `warning`, counted under `error_in`;
+- a routing key registration or deregistration refused, routing keys
+  deregistered, and application servers removed, at `notice`;
 - a callback that raised, at `error` with its stack trace;
 - anything the layer manager has no clause for, at `warning`;
 - a connect endpoint connecting again after its association ended, at
-  `notice`.
+  `notice`, and one whose attempt failed, at `warning`;
+- an SCTP send failure, at `error`; an SCTP remote error, a socket that would
+  not close, and a metrics query that failed, at `warning`.
 
-What remains is upstream's `error_logger` reporting, which predates the
-convention by years: all of `m3ua_app` and `m3ua_rest_prometheus`, the socket
-reports of `m3ua_listen_fsm` and `m3ua_connect_fsm`, the shutdown report in
-`m3ua_lm_server`, and in the two state machines the reports of an SCTP error,
-a socket that will not close and an ERR from the peer.
+Payloads, socket options and process state are never in the `warning` or
+`error` record itself: each has a `debug` record beside it carrying them.
