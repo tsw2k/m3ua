@@ -100,7 +100,7 @@ all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
 			connect_options, connect_device, stop_endpoint, lm_stray,
 			reconnect_in_place,
-			listen_not_accepted,
+			listen_not_accepted, connect_not_taken,
 			endpoint_gives_up, lm_restart, callback_raised, asp_up_ack_unexpected,
 			asp_drst_dupu,
 			undecodable, unexpected, registration_results, ack_timeout,
@@ -1169,6 +1169,50 @@ listen_not_accepted(_Config) ->
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer1),
 	ok = gen_sctp:close(Peer2).
+
+connect_not_taken() ->
+	[{userdata, [{doc, "An association a connecting endpoint cannot hand to a state machine costs that association, and the endpoint connects again."}]}].
+
+connect_not_taken(_Config) ->
+	%% The callback refuses while this process is registered under
+	%% the name; the first association is refused that way.
+	Finit = fun(_Module, _Fsm, _EP, _EpName, _Assoc, _Options, _Pid) ->
+				case whereis(m3ua_api_refuse) of
+					undefined ->
+						{ok, once, []};
+					_ ->
+						{error, refused}
+				end
+	end,
+	Callback = (callback(make_ref()))#m3ua_fsm_cb{init = Finit},
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	ok = gen_sctp:listen(Peer, true),
+	{ok, {_, Port}} = inet:sockname(Peer),
+	true = register(m3ua_api_refuse, self()),
+	{ok, EP} = m3ua:start(Callback, 0,
+			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
+	ok = comm_up(Peer),
+	ok = receive
+		{sctp, Peer, _, _, {_, #sctp_assoc_change{state = State}}}
+				when State /= comm_up ->
+			ok
+	after
+		4000 ->
+			still_up
+	end,
+	true = unregister(m3ua_api_refuse),
+	%% The endpoint is the same, and connects again once it has waited.
+	true = is_process_alive(EP),
+	ok = receive
+		{sctp, Peer, _, _, {_, #sctp_assoc_change{state = comm_up}}} ->
+			ok
+	after
+		12000 ->
+			no_association
+	end,
+	[_] = assoc(EP, 40),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
 
 %% @hidden
 %% 	The endpoints started with `Name'. One stopping or restarting

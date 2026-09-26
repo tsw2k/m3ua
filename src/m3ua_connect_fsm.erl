@@ -387,11 +387,34 @@ handle_connect(AssocChange, #statedata{socket = Socket,
 							receiver = undefined},
 					{next_state, connected, NewStateData};
 				{error, Reason} ->
-					{stop, Reason, StateData}
+					_ = supervisor:terminate_child(Sup, Fsm),
+					not_connected(controlling_process, Reason,
+							AssocChange, StateData)
 			end;
 		{error, Reason} ->
-			{stop, Reason, StateData}
+			not_connected(start_child, Reason, AssocChange, StateData)
 	end.
+
+%% @hidden
+%% 	An association that came up but could not be handed to a state
+%% 	machine is lost; the endpoint is not. This used to stop it, which
+%% 	the supervisor counts, where the association going down in an
+%% 	orderly way connects again (see handle_event/4). Seen once in a lab
+%% 	run, `closed' from handing the socket over, in a case that stops
+%% 	the endpoint straight after starting it. m3ua_listen_fsm's
+%% 	not_accepted/6 is the same on the listening side.
+not_connected(Stage, Reason, #sctp_assoc_change{assoc_id = Assoc},
+		#statedata{socket = Socket, remote_addr = Address,
+		remote_port = Port} = StateData) ->
+	_ = m3ua_sctp:close(Socket),
+	?LOG_WARNING("Association not taken on, connecting again",
+			#{layer => m3ua, ep => self(), assoc => Assoc,
+			remote => {Address, Port}, stage => Stage, reason => Reason}),
+	NewStateData = StateData#statedata{socket = undefined,
+			receiver = undefined, local_addr = undefined,
+			local_port = undefined},
+	{next_state, connecting, NewStateData,
+			{timeout, ?RETRY_WAIT, timeout}}.
 
 %% @hidden
 %% 	The device to bind into -- a VRF -- goes on before the bind, and the
