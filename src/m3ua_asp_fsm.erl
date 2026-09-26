@@ -1322,6 +1322,20 @@ handle_asp(#m3ua{class = ?MGMTMessage, type = ?MGMTNotify, params = Params},
 	NewCount = maps:put(notify_in, NotifyIn + 1, Count1),
 	{next_state, StateName, StateData#statedata{count = NewCount,
 			cb_state = NewCbState}};
+%% RFC4666, Section-4.3.4.1: "If the ASP receives an unexpected ASP Up
+%% Ack message, the ASP should consider itself in the ASP-INACTIVE state.
+%% If the ASP was not in the ASP-INACTIVE state, it SHOULD send an Error
+%% message and then initiate procedures to return itself to its previous
+%% state." Down, it is unexpected where no ASP UP is outstanding -- most
+%% often the ACK to one whose request already timed out.
+handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK},
+		down, _Stream, #statedata{req = Request} = StateData)
+		when not is_tuple(Request); element(1, Request) /= 'M-ASP_UP' ->
+	unexpected_up_ack(down, StateData);
+handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK},
+		StateName, _Stream, StateData)
+		when StateName == inactive; StateName == active ->
+	unexpected_up_ack(StateName, StateData);
 handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK, params = Params},
 		down, _Stream, #statedata{req = Request,
 		socket = _Socket, receiver = Receiver, active = Active, callback = CbMod, cb_state = CbState,
@@ -1758,6 +1772,87 @@ contain(Handler, CbMod, CbArgs, Fallback, Count, EP, Assoc) ->
 					stacktrace => Stacktrace}),
 			Raised = maps:get(callback_raised, Count, 0),
 			{Fallback, maps:put(callback_raised, Raised + 1, Count)}
+	end.
+
+%% @hidden
+%% 	An ASP UP ACK that answers no ASP UP. Inactive already, there is
+%% 	nothing to do. From down or active the asp takes itself to be
+%% 	inactive, as the RFC has it, says so with an ERR, and asks to be
+%% 	back where it was -- unless layer management was taking it out of
+%% 	active anyway, in which case it stays: an ASPIA outstanding is
+%% 	confirmed by the state it is now in, and an ASPDN goes on.
+unexpected_up_ack(inactive, #statedata{receiver = Receiver, active = Active,
+		ep = EP, assoc = Assoc, count = Count} = StateData) ->
+	?LOG_DEBUG("ASPUP ACK while inactive",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			reason => already_inactive}),
+	ok = m3ua_receiver:replenish(Receiver, Active),
+	UpAckIn = maps:get(up_ack_in, Count, 0),
+	NewCount = maps:put(up_ack_in, UpAckIn + 1, Count),
+	{next_state, inactive, StateData#statedata{count = NewCount}};
+unexpected_up_ack(Previous, #statedata{req = Request, callback = CbMod,
+		cb_state = CbState, ep = EP, assoc = Assoc, count = Count} = StateData) ->
+	?LOG_NOTICE("ASPUP ACK unexpected",
+			#{layer => m3ua, ep => EP, assoc => Assoc, state => Previous,
+			reason => unexpected_message}),
+	case state_traffic_maint(undefined, inactive, StateData) of
+		ok ->
+			Handler = case Previous of
+				down ->
+					asp_up;
+				active ->
+					asp_inactive
+			end,
+			{ok, NewCbState} = m3ua_callback:cb(Handler, CbMod, [CbState]),
+			report_carrying(Previous, inactive, EP, Assoc),
+			{Return, NewRequest} = case {Previous, Request} of
+				{active, {'M-ASP_INACTIVE', Ref, From}} ->
+					gen_server:cast(From, {'M-ASP_INACTIVE', confirm, Ref, ok}),
+					{false, undefined};
+				{active, {'M-ASP_DOWN', _, _}} ->
+					{false, Request};
+				_ ->
+					{true, Request}
+			end,
+			UpAckIn = maps:get(up_ack_in, Count, 0),
+			NewCount = maps:put(up_ack_in, UpAckIn + 1, Count),
+			NewStateData = StateData#statedata{req = NewRequest,
+					cb_state = NewCbState, count = NewCount},
+			case send_error(unexpected_message, inactive, NewStateData) of
+				{next_state, inactive, NextStateData} when Return ->
+					return_to(Previous, NextStateData);
+				Result ->
+					Result
+			end;
+		{error, Reason} ->
+			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
+	end.
+
+%% @hidden
+%% 	Ask the peer to put the asp back in `Previous'. No request is made
+%% 	of it and no timer set: the acknowledgement is taken by the clauses
+%% 	that take any other, and if none comes the asp stays inactive,
+%% 	where layer management can see it and act.
+return_to(Previous, #statedata{socket = Socket, peer_addr = PeerAddr,
+		peer_port = PeerPort, ppid = Ppid, ep = EP, assoc = Assoc,
+		count = Count} = StateData) ->
+	{Message, Key} = case Previous of
+		active ->
+			{#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC}, active_out};
+		down ->
+			{#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN}, down_out}
+	end,
+	Packet = m3ua_codec:m3ua(Message),
+	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+		ok ->
+			N = maps:get(Key, Count, 0),
+			NewCount = maps:put(Key, N + 1, Count),
+			{next_state, inactive, StateData#statedata{count = NewCount}};
+		{error, eagain} ->
+			% @todo flow control
+			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
+		{error, Reason} ->
+			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end.
 
 %% @hidden

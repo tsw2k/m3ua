@@ -99,7 +99,7 @@ sequences() ->
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
 			connect_options, stop_endpoint, lm_stray, reconnect_in_place,
-			endpoint_gives_up, lm_restart, callback_raised,
+			endpoint_gives_up, lm_restart, callback_raised, asp_up_ack_unexpected,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
@@ -946,6 +946,67 @@ callback_raised(_Config) ->
 			= m3ua:getcount(EP, Assoc),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+asp_up_ack_unexpected() ->
+	[{userdata, [{doc, "An ASP UP ACK that answers no ASP UP leaves the asp inactive, and from down or active it asks to go back (RFC 4666 4.3.4.1)."}]}].
+
+asp_up_ack_unexpected(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(),
+	Self = self(),
+	AspUpAck = raw_msg(?ASPSMMessage, ?ASPSMASPUPACK),
+	Error = fun() ->
+			#m3ua{class = ?MGMTMessage, type = ?MGMTError,
+					params = Params} = raw_get(Peer),
+			m3ua_codec:fetch_parameter(?ErrorCode,
+					m3ua_codec:parameters(Params))
+	end,
+	_ = spawn(fun() -> Self ! {asp_up, m3ua:asp_up(EP, Assoc)} end),
+	#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP} = raw_get(Peer),
+	ok = raw_put(Peer, PeerAssoc, AspUpAck),
+	ok = receive {asp_up, UpResult} -> UpResult after 4000 -> timeout end,
+	%% Inactive: nothing to do and nothing said.
+	ok = raw_put(Peer, PeerAssoc, AspUpAck),
+	nothing_sent = raw_get(Peer),
+	inactive = asp_status(EP, Assoc, inactive, 40),
+	%% Active: inactive, an ERR, and an ASPAC to be active again.
+	_ = spawn(fun() -> Self ! {asp_active, m3ua:asp_active(EP, Assoc)} end),
+	#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC} = raw_get(Peer),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPACACK)),
+	ok = receive {asp_active, AcResult} -> AcResult after 4000 -> timeout end,
+	ok = raw_put(Peer, PeerAssoc, AspUpAck),
+	unexpected_message = Error(),
+	#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC} = raw_get(Peer),
+	inactive = m3ua:asp_status(EP, Assoc),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPACACK)),
+	active = asp_status(EP, Assoc, active, 40),
+	%% Down, as after an ASP UP whose ACK came too late: inactive, an ERR,
+	%% and an ASPDN to be down again.
+	_ = spawn(fun() -> Self ! {asp_down, m3ua:asp_down(EP, Assoc)} end),
+	#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN} = raw_get(Peer),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPDNACK)),
+	ok = receive {asp_down, DnResult} -> DnResult after 4000 -> timeout end,
+	ok = raw_put(Peer, PeerAssoc, AspUpAck),
+	unexpected_message = Error(),
+	#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN} = raw_get(Peer),
+	inactive = m3ua:asp_status(EP, Assoc),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPDNACK)),
+	down = asp_status(EP, Assoc, down, 40),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+%% @hidden
+%% 	The asp's state once it is `State', or what it is after `N' tries:
+%% 	a message from the peer reaches it by another way than the query.
+asp_status(EP, Assoc, _State, 0) ->
+	m3ua:asp_status(EP, Assoc);
+asp_status(EP, Assoc, State, N) ->
+	case m3ua:asp_status(EP, Assoc) of
+		State ->
+			State;
+		_ ->
+			timer:sleep(50),
+			asp_status(EP, Assoc, State, N - 1)
+	end.
 
 %% @hidden
 %% 	The endpoints started with `Name'. One stopping or restarting
