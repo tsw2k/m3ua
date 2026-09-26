@@ -125,6 +125,13 @@ start(Callback, Port, Options) when is_integer(Port), is_list(Options),
 
 -spec stop(EndPoint:: pid()) -> ok | {error, Reason :: term()}.
 %% @doc Close a previously opened endpoint.
+%%
+%% 	The endpoint and every association on it are gone when this
+%% 	returns: the port is free and nothing reconnects. `EndPoint' is
+%% 	the process {@link start/3} returned; `{error, not_found}' if no
+%% 	endpoint has it, which is also the answer for one already stopped.
+%% 	{@link get_ep/0} and {@link get_ep/1} find an endpoint by the
+%% 	`name' it was started with.
 stop(EP) when is_pid(EP) ->
 	m3ua_lm_server:stop(EP).
 

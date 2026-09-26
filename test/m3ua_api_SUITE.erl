@@ -98,7 +98,7 @@ sequences() ->
 %%
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
-			connect_options,
+			connect_options, stop_endpoint,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
@@ -747,6 +747,48 @@ connect_options(_Config) ->
 	%% Stopped while it has no socket at all.
 	ok = m3ua:stop(EP2),
 	ok = gen_sctp:close(Peer2).
+
+stop_endpoint() ->
+	[{userdata, [{doc, "A stopped endpoint is gone, not restarted, and can be found by name until then."}]}].
+
+stop_endpoint(_Config) ->
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	ok = gen_sctp:listen(Peer, true),
+	{ok, {_, Port}} = inet:sockname(Peer),
+	%% A connecting endpoint: once stopped it does not come back and
+	%% connect again.
+	Name1 = make_ref(),
+	{ok, EP1} = m3ua:start(callback(make_ref()), 0, [{name, Name1},
+			{role, asp}, {connect, {127,0,0,1}, Port, []}]),
+	ok = comm_up(Peer),
+	[EP1] = named(Name1),
+	ok = m3ua:stop(EP1),
+	[] = named(Name1),
+	no_association = comm_up(Peer),
+	{error, not_found} = m3ua:stop(EP1),
+	%% A listening one: the same.
+	Name2 = make_ref(),
+	{ok, EP2} = m3ua:start(callback(make_ref()), 0,
+			[{name, Name2}, {ip, {127,0,0,1}}]),
+	[EP2] = named(Name2),
+	ok = m3ua:stop(EP2),
+	[] = named(Name2),
+	ok = gen_sctp:close(Peer).
+
+%% @hidden
+%% 	The endpoints started with `Name'. One stopping meanwhile answers
+%% 	nothing rather than failing the case.
+named(Name) ->
+	F = fun(EP) ->
+			try m3ua:get_ep(EP) of
+				Info ->
+					element(1, Info) =:= Name
+			catch
+				exit:_ ->
+					false
+			end
+	end,
+	lists:filter(F, m3ua:get_ep()).
 
 %% @hidden
 comm_up(Peer) ->

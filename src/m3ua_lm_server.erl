@@ -311,17 +311,18 @@ handle_call({start, Callback, Options}, {USAP, _Tag} = _From,
 		{error, Reason} ->
 			{reply, {error, Reason}, State}
 	end;
-handle_call({stop, EP}, From, #state{reqs = Reqs} = State) when is_pid(EP) ->
-	try
-		Ref = make_ref(),
-		gen_fsm:send_event(EP, {'M-SCTP_RELEASE', request, Ref, self()}),
-		NewReqs = gb_trees:insert(Ref, From, Reqs),
-		NewState = State#state{reqs = NewReqs},
-		{noreply, NewState}
-	catch
-		_:Reason ->
-			{reply, {error, Reason}, State}
-	end;
+handle_call({stop, EP}, From, #state{ep_sup_sup = EPSupSup} = State)
+		when is_pid(EP) ->
+	%% The endpoint's state machine is a permanent child of its own
+	%% supervisor, so stopping the machine only had it restarted, on
+	%% the same port and connecting to the same peer. Take the whole
+	%% endpoint out of the tree instead, and do it from another process:
+	%% what stops may call back here on its way out.
+	F = fun() ->
+			gen_server:reply(From, stop_ep(EPSupSup, EP))
+	end,
+	_ = spawn(F),
+	{noreply, State};
 handle_call({'M-SCTP_RELEASE', request, EndPoint, Assoc},
 		From, #state{reqs = Reqs, fsms = Fsms} = State) ->
 	case gb_trees:lookup({EndPoint, Assoc}, Fsms) of
@@ -686,6 +687,32 @@ code_change(_OldVsn, State, _Extra) ->
 %%----------------------------------------------------------------------
 %%  internal functions
 %%----------------------------------------------------------------------
+
+%% @hidden
+stop_ep(EPSupSup, EP) ->
+	Has = fun(EndPointSup) ->
+			try supervisor:which_children(EndPointSup) of
+				Children ->
+					lists:keymember(EP, 2, Children)
+			catch
+				exit:_ ->
+					false
+			end
+	end,
+	case [S || {_, S, _, _} <- supervisor:which_children(EPSupSup),
+			is_pid(S), Has(S)] of
+		[EndPointSup] ->
+			case supervisor:terminate_child(EPSupSup, EndPointSup) of
+				ok ->
+					?LOG_NOTICE("Endpoint stopped",
+							#{layer => m3ua, ep => EP}),
+					ok;
+				{error, Reason} ->
+					{error, Reason}
+			end;
+		[] ->
+			{error, not_found}
+	end.
 
 %% @hidden
 get_sups(#state{sup = TopSup, ep_sup_sup = undefined} = State) ->
