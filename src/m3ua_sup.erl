@@ -41,6 +41,9 @@ init([] = _Args) ->
 	%% it, and the endpoint supervisor came back empty. The endpoints
 	%% carry the traffic and do not need the manager to go on doing it;
 	%% a new manager finds them again (m3ua_lm_server:adopt/1).
+	%% The status table is this process's for the same reason: it
+	%% outlives any manager (see m3ua_status).
+	ok = m3ua_status:new(),
 	ChildSpecs = [server(m3ua_lm_server, [self()]),
 			supervisor(m3ua_endpoint_sup_sup, [])],
 	{ok, {{one_for_one, 5, 10}, ChildSpecs}}.

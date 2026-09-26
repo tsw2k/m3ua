@@ -239,6 +239,10 @@
 -include_lib("kernel/include/inet_sctp.hrl").
 -include_lib("kernel/include/logger.hrl").
 
+%% How often the counters an association publishes (m3ua_status) are
+%% brought up to date. Its state is written as it changes.
+-define(PUBLISH_INTERVAL, 1000).
+
 -record(statedata,
 		{socket :: m3ua_sctp:sock() | undefined,
 		receiver :: undefined | pid(),
@@ -419,7 +423,9 @@
 %% @private
 %%
 callback_mode() ->
-	[state_functions].
+	%% state_enter: each state writes itself to m3ua_status on entry,
+	%% in one place rather than at every transition into it.
+	[state_functions, state_enter].
 
 -spec init(Args :: [term()]) ->
 	{ok, StateName :: atom(), StateData :: #statedata{}}
@@ -482,6 +488,9 @@ init1([], #statedata{socket = Socket,
 %% @doc Handle events received in the <b>down</b> state.
 %% @private
 %%
+down(enter, _OldStateName, StateData) ->
+	ok = publish(down, StateData),
+	keep_state_and_data;
 down(timeout, _EventContent, #statedata{ep = EP, assoc = Assoc, receiver = undefined,
 		socket = Socket, active = Active,
 		callback = CbMod, cb_state = CbState} = StateData) ->
@@ -495,6 +504,8 @@ down(timeout, _EventContent, #statedata{ep = EP, assoc = Assoc, receiver = undef
 	%% Nothing is lost by starting late; it waits in the socket's
 	%% receive buffer, which is where the bound wants it anyway.
 	Receiver = m3ua_receiver:start(Socket, self(), Active),
+	%% Not before: this message would cancel the zero timeout above.
+	_ = erlang:send_after(?PUBLISH_INTERVAL, self(), '$m3ua_publish'),
 	{ok, NewCbState} = m3ua_callback:cb(asp_down, CbMod, [CbState]),
 	{next_state, down, StateData#statedata{cb_state = NewCbState,
 			receiver = Receiver, lm = whereis(m3ua)}};
@@ -517,6 +528,9 @@ down(EventType, EventContent, StateData) ->
 %% @doc Handle events received in the <b>inactive</b> state.
 %% @private
 %%
+inactive(enter, _OldStateName, StateData) ->
+	ok = publish(inactive, StateData),
+	keep_state_and_data;
 inactive(cast, {'M-RK_REG', request, _, _, _, _, _, _, _} = Event, StateData) ->
 	handle_reg(Event, inactive, StateData);
 inactive(cast, {'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
@@ -545,6 +559,9 @@ inactive(EventType, EventContent, StateData) ->
 %% @doc Handle events received in the <b>active</b> state.
 %% @private
 %%
+active(enter, _OldStateName, StateData) ->
+	ok = publish(active, StateData),
+	keep_state_and_data;
 active(cast, {'M-RK_REG', request, _, _, _, _, _, _, _} = Event, StateData) ->
 	handle_reg(Event, active, StateData);
 active(cast, {'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
@@ -809,6 +826,10 @@ handle_event(info, {'EXIT', LM, _Reason}, StateName,
 	%% it on its own. Its successor asks for this one (M-LM_ADOPT); its
 	%% death is no reason for the association to end.
 	{next_state, StateName, StateData};
+handle_event(info, '$m3ua_publish', StateName, StateData) ->
+	_ = erlang:send_after(?PUBLISH_INTERVAL, self(), '$m3ua_publish'),
+	ok = publish(StateData),
+	{next_state, StateName, StateData};
 handle_event(info, Info, StateName, #statedata{receiver = Receiver, socket = _Socket,
 		ep = EP, assoc = Assoc, callback = CbMod,
 		cb_state = CbState, active = Active0, count = Count} = StateData) ->
@@ -831,9 +852,11 @@ handle_event(info, Info, StateName, #statedata{receiver = Receiver, socket = _So
 %% @private
 %%
 terminate(Reason, StateName, #statedata{socket = undefined} = StateData) ->
+	ok = m3ua_status:forget(),
 	report_terminated(Reason, StateName, StateData),
 	terminate1(Reason, StateName, StateData);
 terminate(Reason, StateName, #statedata{socket = Socket} = StateData) ->
+	ok = m3ua_status:forget(),
 	report_terminated(Reason, StateName, StateData),
 	case m3ua_sctp:close(Socket) of
 		ok ->
@@ -1643,6 +1666,25 @@ send_notify([], StateName,
 		#statedata{socket = _Socket, receiver = Receiver, active = Active} = StateData) ->
 	ok = m3ua_receiver:replenish(Receiver, Active),
 	{next_state, StateName, StateData}.
+
+%% @hidden
+%% 	This association's row in m3ua_status: all of it on entry to a
+%% 	state, and what changes without one -- counters, the state of the
+%% 	application servers -- once a second.
+publish(StateName, #statedata{ep = EP, ep_name = EpName, assoc = Assoc,
+		peer_addr = PeerAddr, peer_port = PeerPort} = StateData) ->
+	Now = erlang:system_time(millisecond),
+	m3ua_status:association((published(StateData, Now))#{ep => EP,
+			name => EpName, assoc_id => Assoc, peer => {[PeerAddr], PeerPort},
+			asp_state => StateName, since => Now}).
+%% @hidden
+publish(StateData) ->
+	m3ua_status:association(published(StateData,
+			erlang:system_time(millisecond))).
+%% @hidden
+published(#statedata{rks = RKs, count = Count}, Now) ->
+	#{contexts => maps:from_list([{RC, AsState} || {RC, _, AsState} <- RKs]),
+			counters => Count, updated => Now}.
 
 -spec data_stream(SLS, NumStreams) -> Stream
 	when

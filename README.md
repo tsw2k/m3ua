@@ -104,6 +104,14 @@ deregistration `dereg_out` and `dereg_rsp_in` at an ASP, `dereg_in` and
 `dereg_rsp_out` at a gateway. `transfer_discarded` counts transfers refused
 or dropped for the association's state.
 
+**State without asking.** `m3ua:asp_states()` answers every endpoint, by the
+name given with `{name, Name}`, and each association on it: connect or
+listen, the association's state and peer, the ASP state and since when, the
+application servers' states, and the counters above. It reads an ETS table
+each process writes its own row into -- on each change of state, and the
+counters once a second -- so a management walk waits on nothing
+(`m3ua_status`).
+
 ## Logging
 
 The convention is the whole stack's, because a node whose layers report

@@ -48,6 +48,9 @@
 		local_port :: undefined | inet:port_number(),
 		fsms = gb_trees:empty() :: gb_trees:tree(Assoc :: gen_sctp:assoc_id(),
 				Fsm :: pid()),
+		%% Associations that were taken on and have ended since this
+		%% endpoint started, for m3ua_status.
+		ended = 0 :: non_neg_integer(),
 		callback :: {Module :: atom(), State :: term()}}).
 
 %%----------------------------------------------------------------------
@@ -134,6 +137,9 @@ init([Sup, Callback, Opts] = _Args) ->
 										receiver = Receiver,
 										local_addr = LocalAddr,
 										local_port = LocalPort},
+								ok = m3ua_status:endpoint(#{name => Name,
+										mode => listen, role => Role,
+										local_port => LocalPort, ended => 0}),
 								{ok, listening, NewStateData,
 										{timeout, 0, timeout}};
 							{error, Reason} ->
@@ -182,6 +188,7 @@ listening(EventType, EventContent, StateData) ->
 %% @private
 %%
 terminate(_Reason, _StateName, #statedata{socket = Socket} = StateData) ->
+	ok = m3ua_status:forget(),
 	case m3ua_sctp:close(Socket) of
 		ok ->
 			ok;
@@ -263,7 +270,7 @@ handle_event(info, {'EXIT', Receiver, Reason}, _StateName,
 handle_event(info, {'EXIT', _Pid, {shutdown, {{_EP, Assoc}, _Reason}}},
 		StateName, #statedata{fsms = Fsms} = StateData) ->
 	NewFsms = gb_trees:delete(Assoc, Fsms),
-	NewStateData = StateData#statedata{fsms = NewFsms},
+	NewStateData = ended(StateData#statedata{fsms = NewFsms}),
 	{next_state, StateName, NewStateData};
 handle_event(info, {'EXIT', Pid, _Reason}, StateName,
 		#statedata{fsms = Fsms} = StateData) ->
@@ -275,12 +282,21 @@ handle_event(info, {'EXIT', Pid, _Reason}, StateName,
 		       none
 	end,
 	Iter = gb_trees:iterator(Fsms),
-	Key = Fdel(gb_trees:next(Iter)),
-	NewFsms = gb_trees:delete_any(Key, Fsms),
-	NewStateData = StateData#statedata{fsms = NewFsms},
+	NewStateData = case Fdel(gb_trees:next(Iter)) of
+		none ->
+			%% Not a state machine: the layer manager.
+			StateData;
+		Key ->
+			ended(StateData#statedata{fsms = gb_trees:delete(Key, Fsms)})
+	end,
 	{next_state, StateName, NewStateData};
 handle_event(cast, _Event, _StateName, StateData) ->
 	{stop, unimplemented, StateData}.
+
+%% @hidden
+ended(#statedata{ended = Ended} = StateData) ->
+	ok = m3ua_status:endpoint(#{ended => Ended + 1}),
+	StateData#statedata{ended = Ended + 1}.
 
 %% @hidden
 get_sup(#statedata{role = asp, sup = Sup} = StateData) ->

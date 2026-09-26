@@ -23,7 +23,7 @@
 %% export the m3ua public API
 -export([start/1, start/3, stop/1]).
 -export([sctp_release/2, sctp_status/2]).
--export([getstat/1, getstat/2, getstat/3, getcount/2]).
+-export([getstat/1, getstat/2, getstat/3, getcount/2, asp_states/0]).
 -export([as_add/7, as_delete/1, register/6, register/7, deregister/3]).
 -export([get_ep/0, get_ep/1, get_as/0, get_assoc/0, get_assoc/1]).
 -export([asp_status/2, asp_up/2, asp_down/2, asp_active/2,
@@ -234,6 +234,16 @@ getstat(EndPoint, Assoc, Options)
 getcount(EndPoint, Assoc)
 		when is_pid(EndPoint), is_integer(Assoc) ->
 	m3ua_lm_server:getcount(EndPoint, Assoc).
+
+-spec asp_states() -> [{Name, State}]
+	when
+		Name :: term(),
+		State :: m3ua_status:asp_state().
+%% @doc The state of every endpoint and of each association on it,
+%% 	read from a table and without asking any process, for a management
+%% 	walk. See {@link //m3ua/m3ua_status:asp_states/0}.
+asp_states() ->
+	m3ua_status:asp_states().
 
 -spec register(EndPoint, Assoc, RoutingContext, NA, Keys, Mode) ->
 		Result

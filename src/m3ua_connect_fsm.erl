@@ -51,6 +51,9 @@
 		remote_opts :: [gen_sctp:option()],
 		assoc :: gen_sctp:assoc_id(),
 		fsm :: undefined | pid(),
+		%% Associations that came up and have ended since this
+		%% endpoint started, for m3ua_status.
+		ended = 0 :: non_neg_integer(),
 		callback :: {Module :: atom(), State :: term()}}).
 
 -define(RETRY_WAIT, 8000).
@@ -133,6 +136,8 @@ init([Sup, Callback, Opts] = _Args) ->
 					options = Options, cb_options = CbOpts, callback = Callback,
 					remote_addr = Raddr, remote_port = Rport,
 					remote_opts = Ropts},
+			ok = m3ua_status:endpoint(#{name => Name, mode => connect,
+					role => Role, remote => {[Raddr], Rport}, ended => 0}),
 			{ok, connecting, StateData, {timeout, 0, timeout}};
 		false ->
 			{stop, badarg}
@@ -157,6 +162,7 @@ connecting(timeout, _EventContent, #statedata{options = LocalOptions,
 					case m3ua_sctp:connect_init(Socket,
 							RemoteAddress, RemotePort, ConnectOptions) of
 						ok ->
+							ok = m3ua_status:endpoint(#{local_port => LocalPort}),
 							Receiver = m3ua_receiver:start(Socket, self(), once),
 							NewStateData = StateData#statedata{socket = Socket,
 									receiver = Receiver,
@@ -222,8 +228,9 @@ connected(EventType, EventContent, StateData) ->
 %% @private
 %%
 terminate(_Reason, _StateName, #statedata{socket = undefined}) ->
-	ok;
+	m3ua_status:forget();
 terminate(_Reason, _StateName, #statedata{socket = Socket} = StateData) ->
+	ok = m3ua_status:forget(),
 	case m3ua_sctp:close(Socket) of
 		ok ->
 			ok;
@@ -336,9 +343,9 @@ handle_event(info, {'EXIT', Fsm, {shutdown, {{EP, Assoc}, Reason}}},
 	?LOG_NOTICE("Association ended, connecting again",
 			#{layer => m3ua, ep => EP, assoc => Assoc,
 			remote => {Address, Port}, reason => Reason}),
-	NewStateData = StateData#statedata{socket = undefined,
+	NewStateData = ended(StateData#statedata{socket = undefined,
 			receiver = undefined, fsm = undefined, assoc = undefined,
-			local_addr = undefined, local_port = undefined},
+			local_addr = undefined, local_port = undefined}),
 	{next_state, connecting, NewStateData, {timeout, 0, timeout}};
 handle_event(info, {'EXIT', Fsm, Reason}, _StateName,
 		#statedata{socket = undefined, fsm = Fsm} = StateData) ->
@@ -410,11 +417,16 @@ not_connected(Stage, Reason, #sctp_assoc_change{assoc_id = Assoc},
 	?LOG_WARNING("Association not taken on, connecting again",
 			#{layer => m3ua, ep => self(), assoc => Assoc,
 			remote => {Address, Port}, stage => Stage, reason => Reason}),
-	NewStateData = StateData#statedata{socket = undefined,
+	NewStateData = ended(StateData#statedata{socket = undefined,
 			receiver = undefined, local_addr = undefined,
-			local_port = undefined},
+			local_port = undefined}),
 	{next_state, connecting, NewStateData,
 			{timeout, ?RETRY_WAIT, timeout}}.
+
+%% @hidden
+ended(#statedata{ended = Ended} = StateData) ->
+	ok = m3ua_status:endpoint(#{ended => Ended + 1}),
+	StateData#statedata{ended = Ended + 1}.
 
 %% @hidden
 %% 	The device to bind into -- a VRF -- goes on before the bind, and the

@@ -100,7 +100,7 @@ all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
 			connect_options, connect_device, stop_endpoint, lm_stray,
 			reconnect_in_place,
-			listen_not_accepted, connect_not_taken,
+			listen_not_accepted, connect_not_taken, asp_states,
 			endpoint_gives_up, lm_restart, callback_raised, asp_up_ack_unexpected,
 			asp_drst_dupu,
 			undecodable, unexpected, registration_results, ack_timeout,
@@ -1225,6 +1225,74 @@ connect_not_taken(_Config) ->
 	[_] = assoc(EP, 40),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+asp_states() ->
+	[{userdata, [{doc, "Each endpoint and association is readable with no process asked: by name, state as it changes, counters within a second, and gone when it goes."}]}].
+
+asp_states(_Config) ->
+	Name = make_ref(),
+	Ref = make_ref(),
+	{ok, EP} = m3ua:start(sgp_cb(Ref), 0,
+			[{name, Name}, {role, sgp}, {ip, {127,0,0,1}}]),
+	{_, server, sgp, {_, Port}} = m3ua:get_ep(EP),
+	%% Listening, nothing carried.
+	[#{ep := EP, mode := listen, role := sgp, local_port := Port,
+			assoc_state := down, ended := 0}] = named_states(Name),
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	{ok, #sctp_assoc_change{state = comm_up, assoc_id = PeerAssoc}} =
+			gen_sctp:connect(Peer, {127,0,0,1}, Port, []),
+	Sgp = wait(Ref),
+	[Assoc] = assoc(EP, 40),
+	[#{assoc_state := up, assoc_id := Assoc, asp_state := down,
+			peer := {[{127,0,0,1}], _}, since := Since1}] = named_states(Name),
+	%% The state as it changes: asp_status/2 is answered after the
+	%% transition, and so after the row it writes on the way in.
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	inactive = m3ua:asp_status(EP, Assoc),
+	[#{asp_state := inactive, since := Since2}] = named_states(Name),
+	true = Since2 >= Since1,
+	%% Read while the state machine can answer nothing.
+	ok = sys:suspend(Sgp),
+	{Micro, [#{asp_state := inactive}]} = timer:tc(fun() -> named_states(Name) end),
+	true = Micro < 100000,
+	ok = sys:resume(Sgp),
+	%% The counters within a second or so.
+	ct:sleep(1500),
+	[#{counters := #{up_in := 1, up_ack_out := 1}}] = named_states(Name),
+	%% The association gone: the endpoint says it has ended one.
+	ok = gen_sctp:close(Peer),
+	[#{assoc_state := down, ended := 1}] = gone(Name, 40),
+	ok = m3ua:stop(EP),
+	[] = named_states(Name),
+	%% A connecting endpoint with nobody to answer it.
+	{ok, Closed} = gen_sctp:open([{ip, {127,0,0,1}}]),
+	{ok, {_, ClosedPort}} = inet:sockname(Closed),
+	ok = gen_sctp:close(Closed),
+	Name2 = make_ref(),
+	{ok, EP2} = m3ua:start(callback(make_ref()), 0, [{name, Name2},
+			{role, asp}, {connect, {127,0,0,1}, ClosedPort, []}]),
+	[#{ep := EP2, mode := connect, role := asp, assoc_state := connecting,
+			remote := {[{127,0,0,1}], ClosedPort}}] = named_states(Name2),
+	ok = m3ua:stop(EP2),
+	[] = named_states(Name2).
+
+%% @hidden
+named_states(Name) ->
+	[State || {N, State} <- m3ua:asp_states(), N == Name].
+
+%% @hidden
+%% 	The states of `Name' once it carries no association.
+gone(Name, 0) ->
+	named_states(Name);
+gone(Name, N) ->
+	case named_states(Name) of
+		[#{assoc_state := up}] ->
+			ct:sleep(50),
+			gone(Name, N - 1);
+		States ->
+			States
+	end.
 
 %% @hidden
 %% 	The endpoints started with `Name'. One stopping or restarting
