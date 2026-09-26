@@ -32,6 +32,7 @@
 
 -include("m3ua.hrl").
 -include_lib("kernel/include/inet_sctp.hrl").
+-include_lib("kernel/include/logger.hrl").
 
 -record(statedata,
 		{sup :: undefined | pid(),
@@ -295,10 +296,23 @@ handle_info({'EXIT', Receiver, Reason}, _StateName,
 		when Receiver /= undefined ->
 	_ = m3ua_sctp:close(Socket),
 	{stop, {shutdown, {self(), {receiver, Reason}}}, StateData};
-handle_info({'EXIT', Fsm, {shutdown, {{EP, _Assoc}, Reason}}},
-		_StateName, #statedata{socket = Socket, fsm = Fsm} = StateData) ->
-	m3ua_sctp:close(Socket),
-	{stop, {shutdown, {EP, Reason}}, StateData};
+handle_info({'EXIT', Fsm, {shutdown, {{EP, Assoc}, Reason}}},
+		_StateName, #statedata{socket = Socket, fsm = Fsm,
+		remote_addr = Address, remote_port = Port} = StateData) ->
+	%% The association ended in an orderly way -- lost, shut down,
+	%% released -- and the state machine that carried it said so. Connect
+	%% again from here rather than by dying: every death of this process
+	%% is a restart its supervisor counts, and ten a minute take the
+	%% endpoint down. A crash of the state machine still takes this
+	%% process with it, below, and is counted.
+	_ = m3ua_sctp:close(Socket),
+	?LOG_NOTICE("Association ended, connecting again",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			remote => {Address, Port}, reason => Reason}),
+	NewStateData = StateData#statedata{socket = undefined,
+			receiver = undefined, fsm = undefined, assoc = undefined,
+			local_addr = undefined, local_port = undefined},
+	{next_state, connecting, NewStateData, 0};
 handle_info({'EXIT', Fsm, Reason}, _StateName,
 		#statedata{socket = undefined, fsm = Fsm} = StateData) ->
 	{stop, Reason, StateData};

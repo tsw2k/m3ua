@@ -98,7 +98,7 @@ sequences() ->
 %%
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
-			connect_options, stop_endpoint, lm_stray,
+			connect_options, stop_endpoint, lm_stray, reconnect_in_place,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
@@ -786,6 +786,20 @@ lm_stray(_Config) ->
 	%% A call is answered only after what was sent before it.
 	{error, unexpected_request} = gen_server:call(m3ua, no_such_request),
 	LM = whereis(m3ua).
+
+reconnect_in_place() ->
+	[{userdata, [{doc, "A connect endpoint whose association ends connects again as the same process."}]}].
+
+reconnect_in_place(_Config) ->
+	{Peer, PeerAssoc, EP, _Assoc} = raw_sg(),
+	ok = gen_sctp:abort(Peer, #sctp_assoc_change{assoc_id = PeerAssoc}),
+	ok = comm_up(Peer),
+	%% The same endpoint, not one its supervisor started in its place,
+	%% and an association of its own again.
+	true = is_process_alive(EP),
+	[_] = assoc(EP, 40),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
 
 %% @hidden
 %% 	The endpoints started with `Name'. One stopping meanwhile answers
