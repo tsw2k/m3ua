@@ -99,6 +99,7 @@ sequences() ->
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
 			connect_options, stop_endpoint, lm_stray, reconnect_in_place,
+			endpoint_gives_up,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
@@ -801,20 +802,58 @@ reconnect_in_place(_Config) ->
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 
+endpoint_gives_up() ->
+	[{userdata, [{doc, "An endpoint whose supervisor gives up takes only itself down."}]}].
+
+endpoint_gives_up(_Config) ->
+	LM = whereis(m3ua),
+	{ok, Other} = m3ua:start(callback(make_ref()), 0, [{ip, {127,0,0,1}}]),
+	Name = make_ref(),
+	{ok, _} = m3ua:start(callback(make_ref()), 0,
+			[{name, Name}, {ip, {127,0,0,1}}]),
+	%% Its supervisor allows ten restarts a minute; the eleventh is one
+	%% too many.
+	Kill = fun Kill(0) ->
+				ok;
+			Kill(N) ->
+				case named(Name) of
+					[EP] ->
+						exit(EP, kill),
+						timer:sleep(50),
+						Kill(N - 1);
+					[] ->
+						ok
+				end
+	end,
+	ok = Kill(12),
+	timer:sleep(100),
+	[] = named(Name),
+	%% Everything else is where it was.
+	true = lists:member(Other, m3ua:get_ep()),
+	LM = whereis(m3ua),
+	ok = m3ua:stop(Other).
+
 %% @hidden
-%% 	The endpoints started with `Name'. One stopping meanwhile answers
-%% 	nothing rather than failing the case.
+%% 	The endpoints started with `Name'. One stopping or restarting
+%% 	meanwhile answers nothing rather than failing the case.
 named(Name) ->
 	F = fun(EP) ->
 			try m3ua:get_ep(EP) of
 				Info ->
 					element(1, Info) =:= Name
 			catch
-				exit:_ ->
+				_:_ ->
 					false
 			end
 	end,
-	lists:filter(F, m3ua:get_ep()).
+	try m3ua:get_ep() of
+		EPs ->
+			lists:filter(F, EPs)
+	catch
+		_:_ ->
+			timer:sleep(20),
+			named(Name)
+	end.
 
 %% @hidden
 comm_up(Peer) ->

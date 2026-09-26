@@ -49,8 +49,14 @@ init([] = _Args) ->
 %% 	{@link //stdlib/supervisor. supervisor} behaviour.
 %% @private
 %%
+%% 	Each endpoint is `temporary' here. Its own supervisor restarts what
+%% 	fails inside it; if that supervisor gives up, the endpoint is gone,
+%% 	and with it only the endpoint. As a `permanent' child with this
+%% 	supervisor's intensity of 0, the first endpoint to give up took
+%% 	this supervisor down, and m3ua_sup's `one_for_all' took every other
+%% 	endpoint down with it -- none of which was ever started again.
 supervisor(StartMod) ->
 	StartArgs = [StartMod],
 	StartFunc = {supervisor, start_link, StartArgs},
-	{StartMod, StartFunc, permanent, infinity, supervisor, [StartMod]}.
+	{StartMod, StartFunc, temporary, infinity, supervisor, [StartMod]}.
 
