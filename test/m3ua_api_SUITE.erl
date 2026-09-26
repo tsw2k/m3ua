@@ -572,17 +572,32 @@ sgp_transfer_rc(_Config) ->
 	%% No stream named: the SLS picks one, and never stream 0
 	%% (RFC 4666 1.4.7), which an SLS of 0 used to.
 	ok = m3ua:transfer(Sgp, undefined, undefined, OPC, DPC, 0, 3, 0, <<"sgp">>),
-	Stream = receive
-		{sctp, Peer, _, _, {[#sctp_sndrcvinfo{stream = S}], Data}}
-				when is_binary(Data) ->
-			S
-	after
-		1000 ->
-			nothing_sent
-	end,
+	Stream = data_stream(Peer),
 	true = is_integer(Stream) andalso Stream > 0,
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+%% @hidden
+%% 	The stream the next DATA arrives on, passing over the NTFY an sgp
+%% 	sends as an application server changes state. That NTFY goes on
+%% 	stream 0 and may come after the DATA was asked for: taking it for
+%% 	the DATA failed this case more often than not.
+data_stream(Peer) ->
+	receive
+		{sctp, Peer, _, _, {[#sctp_sndrcvinfo{stream = S}], Data}}
+				when is_binary(Data) ->
+			case m3ua_codec:m3ua(Data) of
+				#m3ua{class = ?TransferMessage, type = ?TransferMessageData} ->
+					S;
+				#m3ua{class = ?MGMTMessage, type = ?MGMTNotify} ->
+					data_stream(Peer);
+				Other ->
+					{unexpected, Other}
+			end
+	after
+		1000 ->
+			nothing_sent
+	end.
 
 sgp_deregister_local() ->
 	[{userdata, [{doc, "M-RK_DEREG at a signalling gateway takes its asp out of the application server, with nothing sent."}]}].
