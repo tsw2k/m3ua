@@ -6,7 +6,6 @@
 
 ## Configure new build directory
 mkdir -p shell/lib
-ln -st shell/lib ../../$(ls -d ../sigscale_mibs.build/shell/lib/sigscale_mibs-*)
 
 ## Make edoc available
 mkdir -p ~/public_html/m3ua
