@@ -154,8 +154,13 @@ open(Options) when is_list(Options) ->
 listen(Socket) ->
 	socket:listen(Socket).
 
--spec close(Socket :: sock()) -> ok | {error, Reason :: term()}.
+-spec close(Socket :: sock() | undefined) -> ok | {error, Reason :: term()}.
 %% @doc Close `Socket'.
+%%
+%% 	A connect endpoint whose last attempt failed holds no socket, and
+%% 	being released then is not a fault.
+close(undefined) ->
+	ok;
 close(Socket) ->
 	case socket:close(Socket) of
 		{error, closed} ->
