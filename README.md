@@ -27,8 +27,11 @@ summary a user of the library needs.
 `gen_fsm`; the events they take are unchanged.
 
 **Transport.** SCTP is carried over the `socket` module rather than
-`gen_sctp` (`m3ua_sctp`, `m3ua_receiver`). An endpoint takes `{device, Name}`
-to bind into a VRF. Options given with `{connect, Address, Port, Options}` are
+`gen_sctp` (`m3ua_sctp`, `m3ua_receiver`), as in NG-STP's m2pa, and like it
+needs Erlang/OTP 29, the release the stack is pinned to. An endpoint takes
+`{device, Name}` to bind into a VRF, set before the bind so that the node can
+stay in the default VRF with its loopback, epmd and distribution; given with
+the `connect` options instead, it is moved to where it goes on in time. Options given with `{connect, Address, Port, Options}` are
 set on the socket, and one that `m3ua_sctp` cannot set is an error naming it:
 the endpoint logs *Connect failed* and tries again, rather than coming up
 without it. `sctp_nodelay` is on unless `{sctp_nodelay, false}` is given:

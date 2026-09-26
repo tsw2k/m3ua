@@ -98,7 +98,8 @@ sequences() ->
 %%
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
-			connect_options, stop_endpoint, lm_stray, reconnect_in_place,
+			connect_options, connect_device, stop_endpoint, lm_stray,
+			reconnect_in_place,
 			listen_not_accepted,
 			endpoint_gives_up, lm_restart, callback_raised, asp_up_ack_unexpected,
 			asp_drst_dupu,
@@ -1164,6 +1165,23 @@ named(Name) ->
 			timer:sleep(20),
 			named(Name)
 	end.
+
+connect_device() ->
+	[{userdata, [{doc, "A device given with connect is bound into, and the association comes up."}]}].
+
+connect_device(_Config) ->
+	%% Loopback stands in for a VRF: the point is that a device named
+	%% with the connect options reaches the socket and the association
+	%% still comes up. Whether it went on before the bind, which is what
+	%% a VRF needs, shows only on a host with one.
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	ok = gen_sctp:listen(Peer, true),
+	{ok, {_, Port}} = inet:sockname(Peer),
+	{ok, EP} = m3ua:start(callback(make_ref()), 0, [{role, asp},
+			{connect, {127,0,0,1}, Port, [{device, "lo"}]}]),
+	ok = comm_up(Peer),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
 
 %% @hidden
 comm_up(Peer) ->

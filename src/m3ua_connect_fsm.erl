@@ -124,8 +124,9 @@ init([Sup, Callback, Opts] = _Args) ->
 			Opts5 ++ PpiOptions
 	end,
 	case lists:keytake(connect, 1, Opts6) of
-		{value, {connect, Raddr, Rport, Ropts}, O7} ->
-			Options = nodelay(buffered([{active, once}, {reuseaddr, true} | O7])),
+		{value, {connect, Raddr, Rport, Ropts0}, O7} ->
+			{O8, Ropts} = device(O7, Ropts0),
+			Options = nodelay(buffered([{active, once}, {reuseaddr, true} | O8])),
 			process_flag(trap_exit, true),
 			StateData = #statedata{sup = Sup, role = Role,
 					name = Name, static = Static, use_rc = UseRC,
@@ -390,6 +391,26 @@ handle_connect(AssocChange, #statedata{socket = Socket,
 			end;
 		{error, Reason} ->
 			{stop, Reason, StateData}
+	end.
+
+%% @hidden
+%% 	The device to bind into -- a VRF -- goes on before the bind, and the
+%% 	bind is done when the socket is opened; the options given with
+%% 	connect are set only after that, when it is too late for this one.
+%% 	So a device given there is moved to the options the socket is
+%% 	opened with. One given with those already is the one that binds,
+%% 	and a second, set after the bind, could only contradict it.
+device(Options, ConnectOptions) ->
+	case lists:keytake(device, 1, ConnectOptions) of
+		{value, Device, ConnectOptions1} ->
+			case lists:keymember(device, 1, Options) of
+				true ->
+					{Options, ConnectOptions1};
+				false ->
+					{[Device | Options], ConnectOptions1}
+			end;
+		false ->
+			{Options, ConnectOptions}
 	end.
 
 %% @hidden
