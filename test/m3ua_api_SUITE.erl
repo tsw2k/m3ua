@@ -484,7 +484,7 @@ sgp_deregister() ->
 	[{userdata, [{doc, "ASP DOWN, and ASP UP at an active asp, deregister the routing keys the asp registered (RFC 4666 4.3.4)."}]}].
 
 sgp_deregister(_Config) ->
-	{Peer, PeerAssoc, EP, Assoc} = raw_asp(),
+	{Peer, PeerAssoc, EP, Assoc} = raw_asp(dereg_callback()),
 	AspUp = raw_msg(?ASPSMMessage, ?ASPSMASPUP),
 	AspDown = raw_msg(?ASPSMMessage, ?ASPSMASPDN),
 	AspActive = raw_msg(?ASPTMMessage, ?ASPTMASPAC),
@@ -499,6 +499,7 @@ sgp_deregister(_Config) ->
 	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPDNACK),
 	down = m3ua:asp_status(EP, Assoc),
 	[] = as_asps(RC1),
+	RC1 = deregistered_rc(),
 	%% Register again, go active, then ASP UP: the same.
 	ok = raw_put(Peer, PeerAssoc, AspUp),
 	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
@@ -512,6 +513,7 @@ sgp_deregister(_Config) ->
 	#m3ua{} = raw_expect(Peer, ?MGMTMessage, ?MGMTError),
 	inactive = m3ua:asp_status(EP, Assoc),
 	[] = as_asps(RC2),
+	RC2 = deregistered_rc(),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 
@@ -546,13 +548,14 @@ sgp_deregister_local() ->
 	[{userdata, [{doc, "M-RK_DEREG at a signalling gateway takes its asp out of the application server, with nothing sent."}]}].
 
 sgp_deregister_local(_Config) ->
-	{Peer, PeerAssoc, EP, Assoc} = raw_asp(),
+	{Peer, PeerAssoc, EP, Assoc} = raw_asp(dereg_callback()),
 	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
 	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
 	RC = raw_register(Peer, PeerAssoc),
 	[_] = as_asps(RC),
 	ok = m3ua:deregister(EP, Assoc, RC),
 	[] = as_asps(RC),
+	RC = deregistered_rc(),
 	{error, not_registered} = m3ua:deregister(EP, Assoc, RC),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
@@ -561,7 +564,7 @@ asp_deregister() ->
 	[{userdata, [{doc, "M-RK_DEREG at an asp sends a DEREG REQ and answers with the DEREG RSP's result for its routing context."}]}].
 
 asp_deregister(_Config) ->
-	{Peer, PeerAssoc, EP, Assoc} = raw_sg(),
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(dereg_callback()),
 	Self = self(),
 	%% Up and registered, the gateway's side played by hand.
 	_ = spawn(fun() -> Self ! {asp_up, m3ua:asp_up(EP, Assoc)} end),
@@ -612,9 +615,30 @@ asp_deregister(_Config) ->
 	ok = raw_put(Peer, PeerAssoc, raw_dereg_rsp(RC, deregistered)),
 	ok = receive {deregister, Result2} -> Result2 after 4000 -> timeout end,
 	[] = as_asps(RC),
+	RC = deregistered_rc(),
 	{ok, #{dereg_out := 2, dereg_rsp_in := 2}} = m3ua:getcount(EP, Assoc),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+%% @hidden
+%% 	The suite's callback, telling this process of each deregistration.
+dereg_callback() ->
+	Self = self(),
+	Fdereg = fun(RC, _NA, _Keys, _TMT, State, _Pid) ->
+				Self ! {deregistered, RC},
+				{ok, State}
+	end,
+	(callback(make_ref()))#m3ua_fsm_cb{deregister = Fdereg}.
+
+%% @hidden
+deregistered_rc() ->
+	receive
+		{deregistered, RC} ->
+			RC
+	after
+		4000 ->
+			timeout
+	end.
 
 %% @hidden
 raw_dereg_rsp(RC, Status) ->
@@ -695,7 +719,10 @@ raw_sg(Callback) ->
 %% 	process, connected to an m3ua signalling gateway listening on a
 %% 	port of its own choosing.
 raw_asp() ->
-	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+	raw_asp(callback(make_ref())).
+%% @hidden
+raw_asp(Callback) ->
+	{ok, EP} = m3ua:start(Callback, 0,
 			[{role, sgp}, {ip, {127,0,0,1}}]),
 	{_, server, sgp, {_, Port}} = m3ua:get_ep(EP),
 	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),

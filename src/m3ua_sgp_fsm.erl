@@ -390,7 +390,17 @@
 		Active :: true | false | once | pos_integer(),
 		NewState :: term(),
 		Reason :: term().
--optional_callbacks([audit/4]).
+-callback deregister(RC, NA, Keys, TMT, State) -> Result
+	when
+		RC :: 0..4294967295,
+		NA :: 0..4294967295 | undefined,
+		Keys :: [m3ua:key()],
+		TMT :: m3ua:tmt() | undefined,
+		State :: term(),
+		Result :: {ok, NewState} | {error, Reason},
+		NewState :: term(),
+		Reason :: term().
+-optional_callbacks([audit/4, deregister/5]).
 
 -callback terminate(Reason, State) -> Result
 	when
@@ -1111,9 +1121,9 @@ handle_dereg({'M-RK_DEREG', request, Ref, From, RC}, StateName,
 							#{layer => m3ua, ep => EP, assoc => Assoc,
 							rcs => [RC], reason => 'M-RK_DEREG'}),
 					gen_server:cast(From, {'M-RK_DEREG', confirm, Ref, ok}),
-					NewStateData = StateData#statedata{
+					NewStateData = deregistered([RC], RKs, StateData#statedata{
 							rks = lists:keydelete(RC, 1, RKs),
-							registered = lists:delete(RC, Registered)},
+							registered = lists:delete(RC, Registered)}),
 					{next_state, StateName, NewStateData};
 				{aborted, Reason} ->
 					gen_server:cast(From,
@@ -1789,7 +1799,8 @@ deregister(Reason, #statedata{registered = RCs, rks = RKs,
 					rcs => RCs, reason => Reason}),
 			NewRKs = [RK || {RC, _, _} = RK <- RKs,
 					not lists:member(RC, RCs)],
-			StateData#statedata{rks = NewRKs, registered = []};
+			deregistered(RCs, RKs,
+					StateData#statedata{rks = NewRKs, registered = []});
 		{aborted, Reason1} ->
 			?LOG_ERROR("Routing keys not deregistered",
 					#{layer => m3ua, ep => EP, assoc => Assoc,
@@ -1803,8 +1814,8 @@ deregister(Reason, #statedata{registered = RCs, rks = RKs,
 dereg_request(RCs, StateName,
 		#statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort,
 		ppid = Ppid, receiver = Receiver, active = Active,
-		ep = EP, assoc = Assoc, rks = RKs, registered = Registered,
-		count = Count} = StateData) ->
+		ep = EP, assoc = Assoc, rks = RKs,
+		registered = Registered} = StateData) ->
 	Fsm = self(),
 	F = fun() ->
 			[{RC, dereg_request1(Fsm, RC, Registered)} || RC <- RCs]
@@ -1837,8 +1848,9 @@ dereg_request(RCs, StateName,
 	ok = lists:foreach(Frefused, Results),
 	NewRKs = [RK || {RC, _, _} = RK <- RKs,
 			not lists:member(RC, Deregistered)],
-	NewStateData = StateData#statedata{rks = NewRKs,
-			registered = Registered -- Deregistered},
+	NewStateData = deregistered(Deregistered, RKs,
+			StateData#statedata{rks = NewRKs,
+			registered = Registered -- Deregistered}),
 	DeregResults = [{?DeregistrationResult,
 			#deregistration_result{rc = RC, status = Status}}
 			|| {RC, Status} <- Results],
@@ -1848,9 +1860,10 @@ dereg_request(RCs, StateName,
 	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			ok = m3ua_receiver:replenish(Receiver, Active),
-			DeregIn = maps:get(dereg_in, Count, 0),
-			DeregRspOut = maps:get(dereg_rsp_out, Count, 0),
-			NewCount = maps:put(dereg_in, DeregIn + 1, Count),
+			Count1 = NewStateData#statedata.count,
+			DeregIn = maps:get(dereg_in, Count1, 0),
+			DeregRspOut = maps:get(dereg_rsp_out, Count1, 0),
+			NewCount = maps:put(dereg_in, DeregIn + 1, Count1),
 			NextCount = maps:put(dereg_rsp_out, DeregRspOut + 1, NewCount),
 			{next_state, StateName, NewStateData#statedata{count = NextCount}};
 		{error, eagain} ->
@@ -1934,6 +1947,59 @@ contain1(Handler, F, Fallback, Count, EP, Assoc) ->
 			Raised = maps:get(callback_raised, Count, 0),
 			{Fallback, maps:put(callback_raised, Raised + 1, Count)}
 	end.
+
+%% @hidden
+%% 	Tell the callback of the routing contexts just deregistered, with
+%% 	the routing key each had, as register/5 was told of them. `RKs' is
+%% 	the list from before they were taken out of it. deregister/5 is
+%% 	optional -- a callback module written before it existed does not
+%% 	export it -- and the deregistration has happened whatever the
+%% 	callback answers, so neither its absence nor an error from it
+%% 	undoes anything; both are said at notice.
+deregistered(RCs, RKs, #statedata{callback = CbMod, cb_state = CbState,
+		count = Count, ep = EP, assoc = Assoc} = StateData) ->
+	F = fun(RC, {CbState0, Count0}) ->
+			{NA, Keys, Mode} = case lists:keyfind(RC, 1, RKs) of
+				{RC, RK, _AsState} ->
+					RK;
+				false ->
+					{undefined, [], undefined}
+			end,
+			CbArgs = [RC, NA, Keys, Mode, CbState0],
+			Fcb = fun() -> deregister_cb(CbMod, CbArgs, CbState0, EP, Assoc) end,
+			case contain1(deregister, Fcb, {ok, CbState0}, Count0, EP, Assoc) of
+				{{ok, CbState1}, Count1} ->
+					{CbState1, Count1};
+				{{error, Reason}, Count1} ->
+					?LOG_NOTICE("Deregistration refused by callback",
+							#{layer => m3ua, ep => EP, assoc => Assoc,
+							rc => RC, reason => Reason}),
+					{CbState0, Count1}
+			end
+	end,
+	{NewCbState, NewCount} = lists:foldl(F, {CbState, Count}, RCs),
+	StateData#statedata{cb_state = NewCbState, count = NewCount}.
+%% @hidden
+deregister_cb(CbMod, CbArgs, CbState, EP, Assoc) when is_atom(CbMod) ->
+	case code:ensure_loaded(CbMod) of
+		{module, CbMod} ->
+			case erlang:function_exported(CbMod, deregister, 5) of
+				true ->
+					m3ua_callback:cb(deregister, CbMod, CbArgs);
+				false ->
+					?LOG_NOTICE("Deregistration not delivered",
+							#{layer => m3ua, ep => EP, assoc => Assoc,
+							callback => CbMod, reason => no_callback}),
+					{ok, CbState}
+			end;
+		{error, Reason} ->
+			?LOG_NOTICE("Deregistration not delivered",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					callback => CbMod, reason => Reason}),
+			{ok, CbState}
+	end;
+deregister_cb(#m3ua_fsm_cb{} = CbMod, CbArgs, _CbState, _EP, _Assoc) ->
+	m3ua_callback:cb(deregister, CbMod, CbArgs).
 
 %% @hidden
 update_rks(RC, RK, AsState, RKs) ->

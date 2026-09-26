@@ -22,7 +22,7 @@
 
 %% export the m3ua_callback public API
 -export([init/6, recv/9, send/11, pause/4, resume/4, status/4,
-		audit/4, unavailable_user/6, register/5, asp_up/1, asp_down/1, asp_active/1,
+		audit/4, unavailable_user/6, register/5, deregister/5, asp_up/1, asp_down/1, asp_active/1,
 		asp_inactive/1, notify/4, info/2, terminate/2]).
 
 %% export the m3ua_callback private API
@@ -176,6 +176,23 @@ audit(_Stream, _RCs, _APCs, State) ->
 register(_RC, _NA, _Keys, _TMT, State) ->
 	{ok, State}.
 
+-spec deregister(RC, NA, Keys, TMT, State) -> Result
+	when
+		RC :: 0..4294967295,
+		NA :: undefined | 0..4294967295,
+		Keys :: [m3ua:key()],
+		TMT :: m3ua:tmt() | undefined,
+		State :: term(),
+		Result :: {ok, NewState} | {error, Reason},
+		NewState :: term(),
+		Reason :: term().
+%% @doc A routing key was deregistered: by DEREG REQ or RSP, by an ASP
+%% 	DOWN or an ASP UP at an active ASP (RFC 4666 4.3.4, 4.4.2), or by
+%% 	m3ua:deregister/3. The arguments are those register/5 was given.
+%% 	The default takes no action.
+deregister(_RC, _NA, _Keys, _TMT, State) ->
+	{ok, State}.
+
 -spec asp_up(State) -> Result
 	when
 		State :: term(),
@@ -326,6 +343,10 @@ cb(resume, #m3ua_fsm_cb{resume = F, extra = E}, Args) ->
 cb(status, #m3ua_fsm_cb{status = false}, Args) ->
 	apply(?MODULE, status, Args);
 cb(status, #m3ua_fsm_cb{status = F, extra = E}, Args) ->
+	apply(F, Args ++ E);
+cb(deregister, #m3ua_fsm_cb{deregister = false}, Args) ->
+	apply(?MODULE, deregister, Args);
+cb(deregister, #m3ua_fsm_cb{deregister = F, extra = E}, Args) ->
 	apply(F, Args ++ E);
 cb(register, #m3ua_fsm_cb{register = false}, Args) ->
 	apply(?MODULE, register, Args);

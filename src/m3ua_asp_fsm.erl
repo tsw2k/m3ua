@@ -442,7 +442,17 @@
 		Result :: {ok, NewState} | {error, Reason},
 		NewState :: term(),
 		Reason :: term().
--optional_callbacks([unavailable_user/6]).
+-callback deregister(RC, NA, Keys, TMT, State) -> Result
+	when
+		RC :: 0..4294967295,
+		NA :: 0..4294967295 | undefined,
+		Keys :: [m3ua:key()],
+		TMT :: m3ua:tmt() | undefined,
+		State :: term(),
+		Result :: {ok, NewState} | {error, Reason},
+		NewState :: term(),
+		Reason :: term().
+-optional_callbacks([unavailable_user/6, deregister/5]).
 
 %%----------------------------------------------------------------------
 %%  The m3ua_asp_fsm gen_fsm callbacks
@@ -1243,7 +1253,8 @@ handle_dereg({'M-RK_DEREG', request, Ref, From, RC}, StateName,
 					#{layer => m3ua, ep => EP, assoc => Assoc,
 					rcs => [RC], reason => 'M-RK_DEREG'}),
 			gen_server:cast(From, {'M-RK_DEREG', confirm, Ref, Result}),
-			NewStateData = StateData#statedata{rks = lists:keydelete(RC, 1, RKs)},
+			NewStateData = deregistered([RC], RKs,
+					StateData#statedata{rks = lists:keydelete(RC, 1, RKs)}),
 			{next_state, StateName, NewStateData};
 		false ->
 			gen_server:cast(From,
@@ -1526,8 +1537,9 @@ handle_asp(#m3ua{class = ?RKMMessage, type = ?RKMDEREGRSP, params = Params},
 					#{layer => m3ua, ep => EP, assoc => Assoc,
 					rcs => [RC], reason => dereg_rsp}),
 			gen_server:cast(From, {'M-RK_DEREG', confirm, Ref, Result}),
-			NewStateData = StateData#statedata{req = undefined,
-					rks = lists:keydelete(RC, 1, RKs), count = NewCount},
+			NewStateData = deregistered([RC], RKs,
+					StateData#statedata{req = undefined,
+					rks = lists:keydelete(RC, 1, RKs), count = NewCount}),
 			{next_state, StateName, NewStateData};
 		#deregistration_result{status = Status} ->
 			?LOG_NOTICE("Routing key deregistration refused by peer",
@@ -1937,6 +1949,59 @@ unavailable_user(CbMod, CbArgs, CbState, EP, Assoc) when is_atom(CbMod) ->
 	end;
 unavailable_user(#m3ua_fsm_cb{} = CbMod, CbArgs, _CbState, _EP, _Assoc) ->
 	m3ua_callback:cb(unavailable_user, CbMod, CbArgs).
+
+%% @hidden
+%% 	Tell the callback of the routing contexts just deregistered, with
+%% 	the routing key each had, as register/5 was told of them. `RKs' is
+%% 	the list from before they were taken out of it. deregister/5 is
+%% 	optional -- a callback module written before it existed does not
+%% 	export it -- and the deregistration has happened whatever the
+%% 	callback answers, so neither its absence nor an error from it
+%% 	undoes anything; both are said at notice.
+deregistered(RCs, RKs, #statedata{callback = CbMod, cb_state = CbState,
+		count = Count, ep = EP, assoc = Assoc} = StateData) ->
+	F = fun(RC, {CbState0, Count0}) ->
+			{NA, Keys, Mode} = case lists:keyfind(RC, 1, RKs) of
+				{RC, RK, _AsState} ->
+					RK;
+				false ->
+					{undefined, [], undefined}
+			end,
+			CbArgs = [RC, NA, Keys, Mode, CbState0],
+			Fcb = fun() -> deregister_cb(CbMod, CbArgs, CbState0, EP, Assoc) end,
+			case contain1(deregister, Fcb, {ok, CbState0}, Count0, EP, Assoc) of
+				{{ok, CbState1}, Count1} ->
+					{CbState1, Count1};
+				{{error, Reason}, Count1} ->
+					?LOG_NOTICE("Deregistration refused by callback",
+							#{layer => m3ua, ep => EP, assoc => Assoc,
+							rc => RC, reason => Reason}),
+					{CbState0, Count1}
+			end
+	end,
+	{NewCbState, NewCount} = lists:foldl(F, {CbState, Count}, RCs),
+	StateData#statedata{cb_state = NewCbState, count = NewCount}.
+%% @hidden
+deregister_cb(CbMod, CbArgs, CbState, EP, Assoc) when is_atom(CbMod) ->
+	case code:ensure_loaded(CbMod) of
+		{module, CbMod} ->
+			case erlang:function_exported(CbMod, deregister, 5) of
+				true ->
+					m3ua_callback:cb(deregister, CbMod, CbArgs);
+				false ->
+					?LOG_NOTICE("Deregistration not delivered",
+							#{layer => m3ua, ep => EP, assoc => Assoc,
+							callback => CbMod, reason => no_callback}),
+					{ok, CbState}
+			end;
+		{error, Reason} ->
+			?LOG_NOTICE("Deregistration not delivered",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					callback => CbMod, reason => Reason}),
+			{ok, CbState}
+	end;
+deregister_cb(#m3ua_fsm_cb{} = CbMod, CbArgs, _CbState, _EP, _Assoc) ->
+	m3ua_callback:cb(deregister, CbMod, CbArgs).
 
 %% @hidden
 generate_lrk_id() ->

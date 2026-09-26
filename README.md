@@ -63,6 +63,8 @@ association:
 - `m3ua:deregister(EndPoint, Assoc, RoutingContext) -> ok | {error, Reason}`:
   at an ASP it sends a DEREG REQ; statically registered, or at a gateway, it
   is done locally.
+- The optional callback `deregister(RC, NA, Keys, TMT, State)` is told of every
+  deregistration, however it came about, with what `register/5` was given.
 - `m3ua:stop(EndPoint)` removes the endpoint and everything on it, and frees
   its port; it used to be restarted at once. An endpoint no supervisor holds
   answers `{error, not_found}`.
