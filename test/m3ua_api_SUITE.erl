@@ -99,7 +99,7 @@ sequences() ->
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
 			connect_options, stop_endpoint, lm_stray, reconnect_in_place,
-			endpoint_gives_up, lm_restart,
+			endpoint_gives_up, lm_restart, callback_raised,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
@@ -649,10 +649,13 @@ as_asps(RC) ->
 %% 	for a signalling gateway so as to put on the wire what m3ua
 %% 	would never send itself.
 raw_sg() ->
+	raw_sg(callback(make_ref())).
+%% @hidden
+raw_sg(Callback) ->
 	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
 	ok = gen_sctp:listen(Peer, true),
 	{ok, {_, Port}} = inet:sockname(Peer),
-	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+	{ok, EP} = m3ua:start(Callback, 0,
 			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
 	PeerAssoc = receive
 		{sctp, Peer, _, _, {_, #sctp_assoc_change{state = comm_up,
@@ -881,6 +884,47 @@ counted(EP, Assoc, N) ->
 			timer:sleep(50),
 			counted(EP, Assoc, N - 1)
 	end.
+
+callback_raised() ->
+	[{userdata, [{doc, "An exception in a callback on the traffic path loses that message, not the association."}]}].
+
+callback_raised(_Config) ->
+	Self = self(),
+	Frecv = fun(_Stream, _RC, _OPC, _DPC, _NI, _SI, _SLS, Data, State, _Pid) ->
+				case Data of
+					<<"boom">> ->
+						error(boom);
+					_ ->
+						Self ! {recv, Data},
+						{ok, once, State}
+				end
+	end,
+	Callback = (callback(make_ref()))#m3ua_fsm_cb{recv = Frecv},
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(Callback),
+	_ = spawn(fun() -> Self ! {asp_up, m3ua:asp_up(EP, Assoc)} end),
+	#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP} = raw_get(Peer),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUPACK)),
+	ok = receive {asp_up, UpResult} -> UpResult after 4000 -> timeout end,
+	_ = spawn(fun() -> Self ! {asp_active, m3ua:asp_active(EP, Assoc)} end),
+	#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC} = raw_get(Peer),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPACACK)),
+	ok = receive {asp_active, AcResult} -> AcResult after 4000 -> timeout end,
+	Transfer = fun(Data) ->
+			ProtocolData = #protocol_data{opc = 1, dpc = 2, si = 3,
+					ni = 2, sls = 0, data = Data},
+			m3ua_codec:m3ua(#m3ua{class = ?TransferMessage,
+					type = ?TransferMessageData,
+					params = [{?ProtocolData, ProtocolData}]})
+	end,
+	ok = raw_put(Peer, PeerAssoc, Transfer(<<"boom">>)),
+	ok = raw_put(Peer, PeerAssoc, Transfer(<<"fine">>)),
+	%% The second arrives: the first cost itself and nothing else.
+	<<"fine">> = receive {recv, Data} -> Data after 4000 -> timeout end,
+	[Assoc] = m3ua:get_assoc(EP),
+	{ok, #{callback_raised := 1, transfer_in := 2}}
+			= m3ua:getcount(EP, Assoc),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
 
 %% @hidden
 %% 	The endpoints started with `Name'. One stopping or restarting

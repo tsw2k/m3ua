@@ -587,15 +587,16 @@ active({'MTP-TRANSFER', request, Ref, From,
 		ok ->
 			CbArgs = [From, Ref, Stream1,
 					RC, OPC, DPC, NI, SI, SLS, Data, CbState],
-			case m3ua_callback:cb(send, CbMod, CbArgs) of
-				{ok, Active, NewCbState} ->
+			Fallback = {ok, StateData#statedata.active, CbState},
+			case contain(send, CbMod, CbArgs, Fallback, Count, EP, Assoc) of
+				{{ok, Active, NewCbState}, Count1} ->
 					NewStateData = StateData#statedata{cb_state = NewCbState},
 					ok = m3ua_receiver:replenish(Receiver, Active),
-					TransferOut = maps:get(transfer_out, Count, 0),
-					NewCount = maps:put(transfer_out, TransferOut + 1, Count),
+					TransferOut = maps:get(transfer_out, Count1, 0),
+					NewCount = maps:put(transfer_out, TransferOut + 1, Count1),
 					NextStateData = NewStateData#statedata{count = NewCount},
 					{next_state, active, NextStateData};
-				{error, Reason} ->
+				{{error, Reason}, _} ->
 					{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 			end;
 		{error, eagain} ->
@@ -644,15 +645,16 @@ active({'MTP-TRANSFER', request, {Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
 		ok ->
 			CbArgs = [From, Ref, Stream1,
 					RC, OPC, DPC, NI, SI, SLS, Data, CbState],
-			case m3ua_callback:cb(send, CbMod, CbArgs) of
-				{ok, Active, NewCbState} ->
+			Fallback = {ok, StateData#statedata.active, CbState},
+			case contain(send, CbMod, CbArgs, Fallback, Count, EP, Assoc) of
+				{{ok, Active, NewCbState}, Count1} ->
 					NewStateData = StateData#statedata{cb_state = NewCbState},
 					ok = m3ua_receiver:replenish(Receiver, Active),
-					TransferOut = maps:get(transfer_out, Count, 0),
-					NewCount = maps:put(transfer_out, TransferOut + 1, Count),
+					TransferOut = maps:get(transfer_out, Count1, 0),
+					NewCount = maps:put(transfer_out, TransferOut + 1, Count1),
 					NextStateData = NewStateData#statedata{count = NewCount},
 					{reply, ok, active, NextStateData};
-				{error, Reason} ->
+				{{error, Reason}, _} ->
 					{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 			end;
 		{error, eagain} ->
@@ -851,13 +853,15 @@ handle_info({'EXIT', LM, _Reason}, StateName,
 	{next_state, StateName, StateData};
 handle_info(Info, StateName, #statedata{receiver = Receiver, socket = _Socket,
 		ep = EP, assoc = Assoc, callback = CbMod,
-		cb_state = CbState} = StateData) ->
-	case m3ua_callback:cb(info, CbMod, [Info, CbState]) of
-		{ok, Active, NewCbState} ->
-			NewStateData = StateData#statedata{cb_state = NewCbState},
+		cb_state = CbState, active = Active0, count = Count} = StateData) ->
+	Fallback = {ok, Active0, CbState},
+	case contain(info, CbMod, [Info, CbState], Fallback, Count, EP, Assoc) of
+		{{ok, Active, NewCbState}, Count1} ->
+			NewStateData = StateData#statedata{cb_state = NewCbState,
+					count = Count1},
 			ok = m3ua_receiver:replenish(Receiver, Active),
 			{next_state, StateName, NewStateData};
-		{error, Reason} ->
+		{{error, Reason}, _} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end.
 
@@ -1339,15 +1343,16 @@ handle_sgp(#m3ua{class = ?TransferMessage,
 	#protocol_data{opc = OPC, dpc = DPC, ni = NI, si = SI, sls = SLS,
 			data = Data} = m3ua_codec:fetch_parameter(?ProtocolData, Parameters),
 	CbArgs = [Stream, RC, OPC, DPC, NI, SI, SLS, Data, CbState],
-	case m3ua_callback:cb(recv, CbMod, CbArgs) of
-		{ok, Active, NewCbState} ->
+	Fallback = {ok, StateData#statedata.active, CbState},
+	case contain(recv, CbMod, CbArgs, Fallback, Count, EP, Assoc) of
+		{{ok, Active, NewCbState}, Count1} ->
 			ok = m3ua_receiver:replenish(Receiver, Active),
-			TransferIn = maps:get(transfer_in, Count, 0),
-			NewCount = maps:put(transfer_in, TransferIn + 1, Count),
+			TransferIn = maps:get(transfer_in, Count1, 0),
+			NewCount = maps:put(transfer_in, TransferIn + 1, Count1),
 			NewStateData = StateData#statedata{active = Active,
 					cb_state = NewCbState, count = NewCount},
 			{next_state, active, NewStateData};
-		{error, Reason} ->
+		{{error, Reason}, _} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
 handle_sgp(#m3ua{class = ?SSNMMessage, type = ?SSNMSCON, params = Params},
@@ -1358,8 +1363,11 @@ handle_sgp(#m3ua{class = ?SSNMMessage, type = ?SSNMSCON, params = Params},
 	RCs = m3ua_codec:get_parameter(?RoutingContext, Parameters, []),
 	APCs = m3ua_codec:get_all_parameter(?AffectedPointCode, Parameters),
 	CbArgs = [Stream, RCs, APCs, CbState],
-	{ok, NewCbState} = m3ua_callback:cb(status, CbMod, CbArgs),
-	NewStateData = StateData#statedata{cb_state = NewCbState},
+	{{ok, NewCbState}, Count1} = contain(status, CbMod, CbArgs,
+			{ok, CbState}, StateData#statedata.count,
+			StateData#statedata.ep, StateData#statedata.assoc),
+	NewStateData = StateData#statedata{cb_state = NewCbState,
+			count = Count1},
 	ok = m3ua_receiver:replenish(Receiver, Active),
 	{next_state, StateName, NewStateData};
 handle_sgp(#m3ua{class = ?SSNMMessage, type = ?SSNMDAUD, params = Params},
@@ -1371,10 +1379,12 @@ handle_sgp(#m3ua{class = ?SSNMMessage, type = ?SSNMDAUD, params = Params},
 	RCs = m3ua_codec:get_parameter(?RoutingContext, Parameters, []),
 	APCs = m3ua_codec:get_all_parameter(?AffectedPointCode, Parameters),
 	CbArgs = [Stream, RCs, APCs, CbState],
-	{ok, NewCbState} = audit(CbMod, CbArgs, CbState, EP, Assoc),
+	F = fun() -> audit(CbMod, CbArgs, CbState, EP, Assoc) end,
+	{{ok, NewCbState}, Count1} = contain1(audit, F, {ok, CbState},
+			Count, EP, Assoc),
 	ok = m3ua_receiver:replenish(Receiver, Active),
-	DaudIn = maps:get(daud_in, Count, 0),
-	NewCount = maps:put(daud_in, DaudIn + 1, Count),
+	DaudIn = maps:get(daud_in, Count1, 0),
+	NewCount = maps:put(daud_in, DaudIn + 1, Count1),
 	NewStateData = StateData#statedata{cb_state = NewCbState,
 			count = NewCount},
 	{next_state, StateName, NewStateData};
@@ -1649,9 +1659,10 @@ send_notify([{Status, RC} | T] = _Notifies, StateName,
 	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			CbArgs = [RC, Status, undefined, CbState],
-			{ok, NewCbState} = m3ua_callback:cb(notify, CbMod, CbArgs),
-			NotifyOut = maps:get(notify_out, Count, 0),
-			NewCount = maps:put(notify_out, NotifyOut + 1, Count),
+			{{ok, NewCbState}, Count1} = contain(notify, CbMod, CbArgs,
+					{ok, CbState}, Count, EP, Assoc),
+			NotifyOut = maps:get(notify_out, Count1, 0),
+			NewCount = maps:put(notify_out, NotifyOut + 1, Count1),
 			NewStateData = StateData#statedata{cb_state = NewCbState, count = NewCount},
 			send_notify(T, StateName, NewStateData);
 	{error, eagain} ->
@@ -1904,6 +1915,34 @@ deregister1(Fsm, RC) ->
 			mnesia:delete(m3ua_asp, Fsm, write);
 		_ ->
 			ok
+	end.
+
+%% @hidden
+%% 	A callback on the path the traffic takes. An exception raised in it
+%% 	is a fault of the user's, and is said at error with where it came
+%% 	from; but it is the fault of one message or one event. Ending the
+%% 	association over it would drop every message behind it, and a
+%% 	message that raises every time would end each new association in
+%% 	turn until the endpoint's supervisor gave up. So it is contained:
+%% 	counted under callback_raised, and `Fallback' answered in its place,
+%% 	which is what the callback would have answered had it done nothing
+%% 	and kept its state.
+contain(Handler, CbMod, CbArgs, Fallback, Count, EP, Assoc) ->
+	F = fun() -> m3ua_callback:cb(Handler, CbMod, CbArgs) end,
+	contain1(Handler, F, Fallback, Count, EP, Assoc).
+%% @hidden
+contain1(Handler, F, Fallback, Count, EP, Assoc) ->
+	try F() of
+		Result ->
+			{Result, Count}
+	catch
+		Class:Reason:Stacktrace ->
+			?LOG_ERROR("Callback raised",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					callback => Handler, class => Class, reason => Reason,
+					stacktrace => Stacktrace}),
+			Raised = maps:get(callback_raised, Count, 0),
+			{Fallback, maps:put(callback_raised, Raised + 1, Count)}
 	end.
 
 %% @hidden
