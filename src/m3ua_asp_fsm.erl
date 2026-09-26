@@ -717,7 +717,7 @@ active(cast, {'MTP-TRANSFER', request, Ref, From,
 		Stream when is_integer(Stream) ->
 			Stream;
 		undefined ->
-			SLS rem NumStreams
+			data_stream(SLS, NumStreams)
 	end,
 	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, Stream1, Ppid, Packet) of
 		ok ->
@@ -818,7 +818,7 @@ active({call, {From, Ref} = Caller},
 		Stream when is_integer(Stream) ->
 			Stream;
 		undefined ->
-			SLS rem NumStreams
+			data_stream(SLS, NumStreams)
 	end,
 	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, Stream1, Ppid, Packet) of
 		ok ->
@@ -1971,6 +1971,26 @@ deregister_cb(#m3ua_fsm_cb{} = CbMod, CbArgs, _CbState, _EP, _Assoc) ->
 %% @hidden
 generate_lrk_id() ->
 	rand:uniform(16#ffffffff).
+
+-spec data_stream(SLS, NumStreams) -> Stream
+	when
+		SLS :: byte(),
+		NumStreams :: non_neg_integer(),
+		Stream :: non_neg_integer().
+%% @doc The stream a DATA goes on when the caller named none.
+%%
+%% 	RFC4666, Section-1.4.7: "The DATA message MUST NOT be sent on stream
+%% 	0." This used to answer `SLS rem NumStreams', which put an SLS of 0,
+%% 	and every multiple of the stream count, on stream 0; osmo-stp
+%% 	answers each with an ERR (Invalid Stream Identifier). The SLS now
+%% 	spreads over streams 1 to NumStreams - 1. An association with a
+%% 	single outbound stream has no other: DATA still goes on stream 0
+%% 	there, against the rule, rather than nowhere.
+%% @hidden
+data_stream(SLS, NumStreams) when NumStreams > 1 ->
+	1 + SLS rem (NumStreams - 1);
+data_stream(_SLS, _NumStreams) ->
+	0.
 
 -spec get_rc(DPC, OPC, SI, RKs, EP, Assoc) -> RC | undefined
 	when

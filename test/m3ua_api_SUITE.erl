@@ -548,7 +548,7 @@ sgp_dereg_req(_Config) ->
 	ok = gen_sctp:close(Peer).
 
 sgp_transfer_rc() ->
-	[{userdata, [{doc, "A signalling gateway names the routing context its routing key matches, after the application server has changed state as well as before."}]}].
+	[{userdata, [{doc, "A signalling gateway names the routing context its routing key matches, after the application server has changed state as well as before, and sends DATA on a stream other than 0."}]}].
 
 sgp_transfer_rc(_Config) ->
 	Ref = make_ref(),
@@ -569,6 +569,18 @@ sgp_transfer_rc(_Config) ->
 			?TransferMessage, ?TransferMessageData),
 	[RC] = m3ua_codec:fetch_parameter(?RoutingContext,
 			m3ua_codec:parameters(Params)),
+	%% No stream named: the SLS picks one, and never stream 0
+	%% (RFC 4666 1.4.7), which an SLS of 0 used to.
+	ok = m3ua:transfer(Sgp, undefined, undefined, OPC, DPC, 0, 3, 0, <<"sgp">>),
+	Stream = receive
+		{sctp, Peer, _, _, {[#sctp_sndrcvinfo{stream = S}], Data}}
+				when is_binary(Data) ->
+			S
+	after
+		1000 ->
+			nothing_sent
+	end,
+	true = is_integer(Stream) andalso Stream > 0,
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 
