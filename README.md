@@ -23,6 +23,9 @@ Signaling Gateway (SG) with Application Servers (AS).
 Each commit says what NG-STP needed that upstream did not give; this is the
 summary a user of the library needs.
 
+**State machines.** All four are `gen_statem` rather than the deprecated
+`gen_fsm`; the events they take are unchanged.
+
 **Transport.** SCTP is carried over the `socket` module rather than
 `gen_sctp` (`m3ua_sctp`, `m3ua_receiver`). An endpoint takes `{device, Name}`
 to bind into a VRF. Options given with `{connect, Address, Port, Options}` are
