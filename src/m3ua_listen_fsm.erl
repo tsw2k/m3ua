@@ -107,7 +107,7 @@ init([Sup, Callback, Opts] = _Args) ->
 		false ->
 			Opts5 ++ PpiOptions
 	end,
-	Options = buffered([{active, once}, {reuseaddr, true} | Opts6]),
+	Options = nodelay(buffered([{active, once}, {reuseaddr, true} | Opts6])),
 	try
 		case m3ua_sctp:open(Options) of
 			{ok, Socket} ->
@@ -334,4 +334,19 @@ buffered(Options) ->
 		false -> [{sndbuf, ?M3UA_SNDBUF}]
 	end,
 	Rec ++ Snd ++ Options.
+
+%% @hidden
+%% Nagle off unless the caller asked otherwise. With it on, a message
+%% sent while an earlier one is still unacknowledged waits for the
+%% peer's SACK, and a delayed SACK is 200 ms: on the live link of the
+%% sibling M2PA transport the replies of the NG-STP node were held for
+%% exactly that, p50 200.0 ms over 6,874 link tests, until m2pa turned
+%% it off. Signalling wants the message out, not the packet full.
+nodelay(Options) ->
+	case lists:keymember(sctp_nodelay, 1, Options) of
+		true ->
+			Options;
+		false ->
+			[{sctp_nodelay, true} | Options]
+	end.
 

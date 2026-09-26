@@ -116,7 +116,7 @@ init([Sup, Callback, Opts] = _Args) ->
 	end,
 	case lists:keytake(connect, 1, Opts6) of
 		{value, {connect, Raddr, Rport, Ropts}, O7} ->
-			Options = buffered([{active, once}, {reuseaddr, true} | O7]),
+			Options = nodelay(buffered([{active, once}, {reuseaddr, true} | O7])),
 			process_flag(trap_exit, true),
 			StateData = #statedata{sup = Sup, role = Role,
 					name = Name, static = Static, use_rc = UseRC,
@@ -409,4 +409,19 @@ buffered(Options) ->
 		false -> [{sndbuf, ?M3UA_SNDBUF}]
 	end,
 	Rec ++ Snd ++ Options.
+
+%% @hidden
+%% Nagle off unless the caller asked otherwise. With it on, a message
+%% sent while an earlier one is still unacknowledged waits for the
+%% peer's SACK, and a delayed SACK is 200 ms: on the live link of the
+%% sibling M2PA transport the replies of the NG-STP node were held for
+%% exactly that, p50 200.0 ms over 6,874 link tests, until m2pa turned
+%% it off. Signalling wants the message out, not the packet full.
+nodelay(Options) ->
+	case lists:keymember(sctp_nodelay, 1, Options) of
+		true ->
+			Options;
+		false ->
+			[{sctp_nodelay, true} | Options]
+	end.
 

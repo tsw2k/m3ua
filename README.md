@@ -28,7 +28,8 @@ summary a user of the library needs.
 to bind into a VRF. Options given with `{connect, Address, Port, Options}` are
 set on the socket, and one that `m3ua_sctp` cannot set is an error naming it:
 the endpoint logs *Connect failed* and tries again, rather than coming up
-without it. `sctp_nodelay` is not set unless asked for.
+without it. `sctp_nodelay` is on unless `{sctp_nodelay, false}` is given:
+with Nagle on, a message can wait for the peer's delayed SACK, 200 ms.
 
 **Messages from the peer.** One the stack cannot use no longer ends the
 association:
