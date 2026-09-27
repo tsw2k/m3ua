@@ -1789,7 +1789,7 @@ reg_tables(RC, RK, Name, AspState) ->
 	F = fun() ->
 			AS = case mnesia:read(m3ua_as, RC, write) of
 				[] ->
-					#m3ua_as{rc = RC};
+					#m3ua_as{rc = RC, rk = RK, name = Name};
 				[#m3ua_as{} = AS0] ->
 					AS0
 			end,
