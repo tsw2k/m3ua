@@ -1475,7 +1475,7 @@ getcount(_Config) ->
 	Mode = loadshare,
 	RefS = make_ref(),
 	{ok, ServerEP} = m3ua:start(callback(RefS), Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -1501,7 +1501,7 @@ getcount(_Config) ->
 			m3ua, getcount, [ClientEP, Assoc]),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 register() ->
 	[{userdata, [{doc, "Register a routing key."}]}].
@@ -1531,7 +1531,7 @@ asp_active(_Config) ->
 	Port = rand:uniform(64511) + 1024,
 	RefS = make_ref(),
 	{ok, ServerEP} = m3ua:start(callback(RefS), Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -1548,7 +1548,7 @@ asp_active(_Config) ->
 	ok = rpc:call(AsNode, m3ua, asp_active, [ClientEP, Assoc]),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 asp_inactive_to_down() ->
 	[{userdata, [{doc, "Make ASP inactive to down state"}]}].
@@ -1575,7 +1575,7 @@ asp_active_to_down(_Config) ->
 	Port = rand:uniform(64511) + 1024,
 	RefS = make_ref(),
 	{ok, ServerEP} = m3ua:start(callback(RefS), Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -1593,7 +1593,7 @@ asp_active_to_down(_Config) ->
 	ok = rpc:call(AsNode, m3ua, asp_down, [ClientEP, Assoc]),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 asp_active_to_inactive() ->
 	[{userdata, [{doc, "Make ASP active to inactive state"}]}].
@@ -1602,7 +1602,7 @@ asp_active_to_inactive(_Config) ->
 	Port = rand:uniform(64511) + 1024,
 	RefS = make_ref(),
 	{ok, ServerEP} = m3ua:start(callback(RefS), Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -1620,7 +1620,7 @@ asp_active_to_inactive(_Config) ->
 	ok = rpc:call(AsNode, m3ua, asp_inactive, [ClientEP, Assoc]),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 get_sctp_status() ->
 	[{userdata, [{doc, "Get SCTP status of an association"}]}].
@@ -1670,7 +1670,7 @@ mtp_transfer(_Config) ->
 	CbS = callback(RefS),
 	{ok, ServerEP} = m3ua:start(CbS#m3ua_fsm_cb{recv = SgpRecv},
 			Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -1699,7 +1699,7 @@ mtp_transfer(_Config) ->
 	end,
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 mtp_cast() ->
 	[{userdata, [{doc, "Send MTP Transfer Message asynchronously"}]}].
@@ -1708,7 +1708,7 @@ mtp_cast(_Config) ->
 	Port = rand:uniform(64511) + 1024,
 	RefS = make_ref(),
 	{ok, ServerEP} = m3ua:start(callback(RefS), Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -1738,7 +1738,7 @@ mtp_cast(_Config) ->
 	end,
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 asp_up_indication() ->
 	[{userdata, [{doc, "Received M-ASP_UP indication"}]}].
@@ -1753,7 +1753,7 @@ asp_up_indication(_Config) ->
 	RefS = make_ref(),
 	CbS = callback(RefS),
 	{ok, ServerEP} = m3ua:start(CbS#m3ua_fsm_cb{asp_up = Fup}, Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -1767,7 +1767,7 @@ asp_up_indication(_Config) ->
 	wait(RefU),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 asp_active_indication() ->
 	[{userdata, [{doc, "Received M-ASP_ACTIVE indication"}]}].
@@ -1782,7 +1782,7 @@ asp_active_indication(_Config) ->
 	RefS = make_ref(),
 	CbS = callback(RefS),
 	{ok, ServerEP} = m3ua:start(CbS#m3ua_fsm_cb{asp_active = Fact}, Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -1800,7 +1800,7 @@ asp_active_indication(_Config) ->
 	wait(RefA),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 asp_inactive_indication() ->
 	[{userdata, [{doc, "Received M-ASP_INACTIVE indication"}]}].
@@ -1816,7 +1816,7 @@ asp_inactive_indication(_Config) ->
 	CbS = callback(RefS),
 	{ok, ServerEP} = m3ua:start(CbS#m3ua_fsm_cb{asp_inactive = Finact},
 			Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -1835,7 +1835,7 @@ asp_inactive_indication(_Config) ->
 	wait(RefI),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 asp_down_indication() ->
 	[{userdata, [{doc, "Received M-ASP_DOWN indication"}]}].
@@ -1850,7 +1850,7 @@ asp_down_indication(_Config) ->
 	RefS = make_ref(),
 	CbS = callback(RefS),
 	{ok, ServerEP} = m3ua:start(CbS#m3ua_fsm_cb{asp_down = Fdown}, Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -1869,7 +1869,7 @@ asp_down_indication(_Config) ->
 	wait(RefD),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 sg_state_active() ->
 	[{userdata, [{doc, "SG traffic maintenance for AS state"}]}].
@@ -1889,7 +1889,7 @@ sg_state_active(_Config) ->
 	Port = rand:uniform(64511) + 1024,
 	RefS = make_ref(),
 	{ok, ServerEP} = m3ua:start(callback(RefS), Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -1943,7 +1943,7 @@ sg_state_active(_Config) ->
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP2]),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP3]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 as_state_active() ->
 	[{userdata, [{doc, "AS traffic maintenance for AS state"}]}].
@@ -1963,7 +1963,7 @@ as_state_active(_Config) ->
 	Port = rand:uniform(64511) + 1024,
 	RefS = make_ref(),
 	{ok, ServerEP} = m3ua:start(callback(RefS), Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -2004,7 +2004,7 @@ as_state_active(_Config) ->
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP2]),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP3]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 sg_state_down() ->
 	[{userdata, [{doc, "SG state maintenance for AS state"}]}].
@@ -2024,7 +2024,7 @@ sg_state_down(_Config) ->
 	Port = rand:uniform(64511) + 1024,
 	RefS = make_ref(),
 	{ok, ServerEP} = m3ua:start(callback(RefS), Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -2071,7 +2071,7 @@ sg_state_down(_Config) ->
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP2]),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP3]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 as_state_down() ->
 	[{userdata, [{doc, "AS state maintenance for AS state"}]}].
@@ -2091,7 +2091,7 @@ as_state_down(_Config) ->
 	Port = rand:uniform(64511) + 1024,
 	RefS = make_ref(),
 	{ok, ServerEP} = m3ua:start(callback(RefS), Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -2137,7 +2137,7 @@ as_state_down(_Config) ->
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP2]),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP3]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 %%---------------------------------------------------------------------
 %%  Internal functions
@@ -2239,13 +2239,17 @@ get_as(RC) ->
 			Reason
 	end.
 
-slave_as() ->
+%% @hidden
+%% 	A node of its own for an application server process, on this host,
+%% 	with m3ua and this suite in its code path and this node's cookie.
+%% 	peer rather than slave, which goes in OTP 31.
+as_node() ->
 	Path1 = filename:dirname(code:which(m3ua)),
 	Path2 = filename:dirname(code:which(?MODULE)),
-	ErlFlags = "-pa " ++ Path1 ++ " -pa " ++ Path2,
-	{ok, Host} = inet:gethostname(),
-	Node = "as" ++ integer_to_list(erlang:unique_integer([positive])),
-	slave:start_link(Host, Node, ErlFlags).
+	Name = "as" ++ integer_to_list(erlang:unique_integer([positive])),
+	peer:start_link(#{name => Name,
+			args => ["-pa", Path1, "-pa", Path2,
+					"-setcookie", atom_to_list(erlang:get_cookie())]}).
 
 ssnm_pause_resume() ->
 	[{userdata, [{doc, "A signalling gateway tells an ASP that SS7 "
@@ -2257,7 +2261,7 @@ ssnm_pause_resume(_Config) ->
 	Port = rand:uniform(64511) + 1024,
 	RefS = make_ref(),
 	{ok, ServerEP} = m3ua:start(sgp_cb(RefS), Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -2293,7 +2297,7 @@ ssnm_pause_resume(_Config) ->
 	end,
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
 
 ssnm_audit() ->
 	[{userdata, [{doc, "An ASP audits the state of SS7 destinations "
@@ -2308,7 +2312,7 @@ ssnm_audit(_Config) ->
 	CbS = sgp_cb(RefS),
 	{ok, ServerEP} = m3ua:start(CbS#m3ua_fsm_cb{
 			audit = fun ?MODULE:cb_audit/6}, Port, []),
-	{ok, AsNode} = slave_as(),
+	{ok, AsPeer, AsNode} = as_node(),
 	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
 	ok = rpc:call(AsNode, application, start, [inets]),
 	ok = rpc:call(AsNode, application, start, [m3ua]),
@@ -2345,4 +2349,4 @@ ssnm_audit(_Config) ->
 	end,
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
 	ok = m3ua:stop(ServerEP),
-	ok = slave:stop(AsNode).
+	ok = peer:stop(AsPeer).
