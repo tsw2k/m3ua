@@ -1368,7 +1368,13 @@ state_traffic_maint1([RC | T], Event,
 			ok = lists:foreach(F3, NotifyFsms),
 			state_traffic_maint1(T, Event, StateData);
 		{aborted, Reason} ->
-			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
+			%% Every caller takes the answer as the state data; a stop
+			%% tuple here killed the state machine later, of a badrecord
+			%% that said nothing of the cause.
+			error_logger:error_report(["Application server state not updated",
+					{module, ?MODULE}, {endpoint, EP}, {association, Assoc},
+					{rc, RC}, {event, Event}, {reason, Reason}]),
+			state_traffic_maint1(T, Event, StateData)
 	end;
 state_traffic_maint1([], _Event, StateData) ->
 	StateData.
