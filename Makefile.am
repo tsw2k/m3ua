@@ -2,7 +2,7 @@
 ##
 ## Process this file with automake to produce Makefile.in
 
-SUBDIRS = include ebin doc priv mibs test
+SUBDIRS = include ebin doc priv test
 
 RELEASE_NAME = $(PACKAGE_NAME)-$(PACKAGE_VERSION)
 
@@ -29,7 +29,7 @@ $(RELEASE_NAME).tar.gz: $(RELEASE_NAME).rel ebin/$(PACKAGE_NAME).appup sys.confi
 							|| {App, Vsn} <- Apps, \
 							filelib:is_regular(code:where_is_file(atom_to_list(App) ++ \".appup\"))], \
 					systools:make_tar(\"$(RELEASE_NAME)\", \
-							[{dirs, [include,mibs,doc]}, {extra_files, ExtraFiles}])" \
+							[{dirs, [include,doc]}, {extra_files, ExtraFiles}])" \
 			-s init stop
 	rm -rf $(ERLTMP)
 else
@@ -40,7 +40,7 @@ $(RELEASE_NAME).tar.gz: $(RELEASE_NAME).rel ebin/$(PACKAGE_NAME).appup sys.confi
 			-noinput -boot_var OTPHOME lib \
 			-eval "systools:make_script(\"$(RELEASE_NAME)\", \
 					[{variables, [{\"OTPHOME\", \"$(ERLTMP)\"}]}])" \
-			-eval "systools:make_tar(\"$(RELEASE_NAME)\", [{dirs, [include,mibs,doc]}])" \
+			-eval "systools:make_tar(\"$(RELEASE_NAME)\", [{dirs, [include,doc]}])" \
 			-s init stop
 	rm -rf $(ERLTMP)
 endif
@@ -52,8 +52,6 @@ install-data-hook: $(RELEASE_NAME).tar.gz
 	$(MKDIR_P) $(DESTDIR)/$(otpdir)/log
 	$(MKDIR_P) $(DESTDIR)/$(otpdir)/tls
 	$(MKDIR_P) $(DESTDIR)/$(otpdir)/log/http
-	$(MKDIR_P) $(DESTDIR)/$(otpdir)/snmp/conf
-	$(MKDIR_P) $(DESTDIR)/$(otpdir)/snmp/db
 
 EXTRA_DIST = $(RELEASE_NAME).tar.gz
 

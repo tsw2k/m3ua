@@ -42,8 +42,6 @@ AC_ERLANG_SUBST_INSTALL_LIB_DIR
 otpdir=$ERLANG_INSTALL_LIB_DIR/..
 appdir=$ERLANG_INSTALL_LIB_DIR/$PACKAGE_NAME-$PACKAGE_VERSION
 beamdir=$ERLANG_INSTALL_LIB_DIR/$PACKAGE_NAME-$PACKAGE_VERSION/ebin
-emibdir=$ERLANG_INSTALL_LIB_DIR/$PACKAGE_NAME-$PACKAGE_VERSION/priv/mibs
-mibsdir=$ERLANG_INSTALL_LIB_DIR/$PACKAGE_NAME-$PACKAGE_VERSION/mibs
 wwwdir=$ERLANG_INSTALL_LIB_DIR/$PACKAGE_NAME-$PACKAGE_VERSION/priv/www
 eincludedir=$ERLANG_INSTALL_LIB_DIR/$PACKAGE_NAME-$PACKAGE_VERSION/include
 docdir=$ERLANG_INSTALL_LIB_DIR/$PACKAGE_NAME-$PACKAGE_VERSION/doc
@@ -51,8 +49,6 @@ reldir=$ERLANG_INSTALL_LIB_DIR/../releases
 AC_SUBST(otpdir)
 AC_SUBST(appdir)
 AC_SUBST(beamdir)
-AC_SUBST(emibdir)
-AC_SUBST(mibsdir)
 AC_SUBST(wwwdir)
 AC_SUBST(eincludedir)
 AC_SUBST(reldir)
@@ -70,7 +66,6 @@ AM_CONDITIONAL([MAKE_TAR_EXTRA_FILES],
 AC_ERLANG_CHECK_LIB([mnesia], [], [AC_MSG_ERROR([mnesia was not found!])])
 AC_ERLANG_CHECK_LIB([compiler], [], [AC_MSG_ERROR([compiler was not found!])])
 AC_ERLANG_CHECK_LIB([inets], [], [AC_MSG_ERROR([inets was not found!])])
-AC_ERLANG_CHECK_LIB([snmp], [], [AC_MSG_ERROR([snmp was not found!])])
 
 
 ##
@@ -93,6 +88,6 @@ AC_ERLANG_CHECK_LIB([snmp], [], [AC_MSG_ERROR([snmp was not found!])])
 ## Output:  create output files
 ## 
 AC_OUTPUT([Makefile include/Makefile ebin/Makefile doc/Makefile priv/Makefile
-		priv/www/Makefile priv/mibs/Makefile mibs/Makefile test/Makefile
+		priv/www/Makefile test/Makefile
 		$PACKAGE_NAME.rel ebin/$PACKAGE_NAME.appup sys.config])
 

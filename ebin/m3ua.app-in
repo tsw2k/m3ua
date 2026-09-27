@@ -19,7 +19,6 @@
 				m3ua_receiver,
 				m3ua_status,
 				m3ua_callback,
-				m3ua_mib,
 				m3ua_rest_accepted_content,
 				m3ua_rest_get,
 				m3ua_rest_prometheus]},
@@ -28,7 +27,6 @@
 				[kernel,
 				stdlib,
 				mnesia,
-				inets,
-				snmp]},
+				inets]},
 		{env, []},
 		{mod, {m3ua_app, []}}]}.

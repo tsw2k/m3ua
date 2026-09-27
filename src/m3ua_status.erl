@@ -19,11 +19,11 @@
 %%% 	asking any process.
 %%%
 %%% 	A management walk every few seconds must not wait on a state
-%%% 	machine that is busy, or on one that is gone. The tables behind
-%%% 	{@link //m3ua/m3ua_mib. m3ua_mib} are read in transactions and by
-%%% 	calling the state machines, so they cannot serve it. Here each
+%%% 	machine that is busy, or on one that is gone, and m3ua's calls --
+%%% 	asp_status/2, getcount/2 -- ask the state machines. Here each
 %%% 	process writes its own row into one ETS table, and
-%%% 	{@link asp_states/0} reads the table and nothing else.
+%%% 	{@link asp_states/0} reads the table and nothing else. The node's
+%%% 	MIB is built on it, and on the m3ua_as table, outside m3ua.
 %%%
 %%% 	== Who writes what ==
 %%%

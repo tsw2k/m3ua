@@ -22,7 +22,6 @@ beam_DATA = m3ua.beam m3ua_app.beam \
 		m3ua_receiver.beam \
 		m3ua_status.beam \
 		m3ua_callback.beam \
-		m3ua_mib.beam \
 		m3ua_rest_accepted_content.beam \
 		m3ua_rest_get.beam \
 		m3ua_rest_prometheus.beam

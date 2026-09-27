@@ -15,7 +15,6 @@ modhtml = m3ua.html m3ua_app.html \
 		m3ua_lm_server.html \
 		m3ua_codec.html \
 		m3ua_callback.html \
-		m3ua_mib.html \
 		m3ua_rest_accepted_content.html \
 		m3ua_rest_get.html \
 		m3ua_rest_prometheus.html
