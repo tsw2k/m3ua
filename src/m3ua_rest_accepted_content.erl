@@ -55,7 +55,13 @@ do(#mod{method = Method, parsed_header = Headers, request_uri = Uri,
 		undefined ->
 			case proplists:get_value(response, Data) of
 				undefined ->
-					Path = http_uri:decode(Uri),
+					Path = case uri_string:percent_decode(Uri) of
+						Decoded when is_list(Decoded) ->
+							Decoded;
+						{error, _, _} ->
+							%% Left as it came: it names no resource.
+							Uri
+					end,
 					case string:tokens(Path, "/?") of
 						["metrics"] ->
 							check_content_type_header(Headers, Method, m3ua_rest_prometheus, Data);

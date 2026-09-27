@@ -115,7 +115,7 @@ as_state2(Name, pending, Acc) ->
 
 %% @hidden
 asp_state() ->
-	asp_state(catch m3ua:get_assoc()).
+	asp_state(safely(fun m3ua:get_assoc/0)).
 %% @hidden
 asp_state([]) ->
 	[];
@@ -131,11 +131,11 @@ asp_state({'EXIT', Reason}) ->
 	[].
 %% @hidden
 asp_state([{EP, Assoc} | T], Acc) ->
-	NewAcc = case catch m3ua:get_ep(EP) of
+	NewAcc = case safely(fun() -> m3ua:get_ep(EP) end) of
 		EndPoint when size(EndPoint) >= 4 ->
 			Name = element(1, EndPoint),
 			Role = atom_to_list(element(3, EndPoint)),
-			asp_state1(Name, Role, catch m3ua:asp_status(EP, Assoc), Acc);
+			asp_state1(Name, Role, safely(fun() -> m3ua:asp_status(EP, Assoc) end), Acc);
 		{'EXIT', Reason} ->
 			?LOG_WARNING("Failed to get endpoint",
 					#{layer => m3ua, reason => Reason}),
@@ -181,7 +181,7 @@ asp_state2(Name, Role, active, Acc) ->
 
 %% @hidden
 sctp_state() ->
-	sctp_state(catch m3ua:get_assoc()).
+	sctp_state(safely(fun m3ua:get_assoc/0)).
 %% @hidden
 sctp_state([]) ->
 	[];
@@ -198,7 +198,7 @@ sctp_state({'EXIT', Reason}) ->
 	[].
 %% @hidden
 sctp_state([{EP, Assoc} | T], Acc) ->
-	NewAcc = case catch m3ua:get_ep(EP) of
+	NewAcc = case safely(fun() -> m3ua:get_ep(EP) end) of
 		EndPoint when size(EndPoint) >= 4 ->
 			Name = element(1, EndPoint),
 			Role = atom_to_list(element(2, EndPoint)),
@@ -363,7 +363,7 @@ sctp_state2(Name, Role, shutdown__asck_sent, Acc) ->
 
 %% @hidden
 asp_count() ->
-	asp_count(catch m3ua:get_assoc()).
+	asp_count(safely(fun m3ua:get_assoc/0)).
 %% @hidden
 asp_count([]) ->
 	[];
@@ -378,7 +378,7 @@ asp_count({'EXIT', Reason}) ->
 	[].
 %% @hidden
 asp_count([{EP, Assoc} | T], Acc) ->
-	NewAcc = case catch m3ua:get_ep(EP) of
+	NewAcc = case safely(fun() -> m3ua:get_ep(EP) end) of
 		EndPoint when size(EndPoint) >= 4 ->
 			Name = element(1, EndPoint),
 			Role = atom_to_list(element(3, EndPoint)),
@@ -490,3 +490,18 @@ asp_count2(Name, Role, Count, Acc) ->
 			"\",role=\"", Role, "\",type=\"transfer-in\"} ",
 			integer_to_list(maps:get(transfer_in, Count, 0)), "\n"] | Acc].
 
+%% @hidden
+%% 	What `catch Expr' answered, without the deprecated expression: an
+%% 	exception comes back as {'EXIT', Reason}, which the clauses above
+%% 	report.
+safely(F) ->
+	try
+		F()
+	catch
+		throw:Value ->
+			Value;
+		exit:Reason ->
+			{'EXIT', Reason};
+		error:Reason:Stacktrace ->
+			{'EXIT', {Reason, Stacktrace}}
+	end.

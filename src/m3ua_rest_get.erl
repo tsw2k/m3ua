@@ -61,7 +61,13 @@ do(#mod{method = Method, parsed_header = _Headers, request_uri = Uri,
 								false ->
 									{proceed, Data};
 								{_, Resource} ->
-									Path = http_uri:decode(Uri),
+									Path = case uri_string:percent_decode(Uri) of
+										Decoded when is_list(Decoded) ->
+											Decoded;
+										{error, _, _} ->
+											%% Left as it came: it names no resource.
+											Uri
+									end,
 									parse_query(Resource, ModData, httpd_util:split_path(Path))
 							end;
 						_Response ->

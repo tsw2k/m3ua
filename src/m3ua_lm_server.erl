@@ -438,11 +438,12 @@ handle_call({getstat, EndPoint, Assoc, Options}, _From,
 	case gb_trees:lookup({EndPoint, Assoc}, Fsms) of
 		{value, Fsm} ->
 			Event = {getstat, Options},
-			case catch gen_statem:call(Fsm, Event, 5000) of
-				{'EXIT', Reason} ->
-					{reply, {error, Reason}, State};
+			try gen_statem:call(Fsm, Event, 5000) of
 				Reply ->
 					{reply, Reply, State}
+			catch
+				exit:Reason ->
+					{reply, {error, Reason}, State}
 			end;
 		none ->
 			{reply, {error, not_found}, State}
@@ -451,11 +452,12 @@ handle_call({getcount, EndPoint, Assoc}, _From,
 		#state{fsms = Fsms} = State) ->
 	case gb_trees:lookup({EndPoint, Assoc}, Fsms) of
 		{value, Fsm} ->
-			case catch gen_statem:call(Fsm, getcount, 5000) of
-				{'EXIT', Reason} ->
-					{reply, {error, Reason}, State};
+			try gen_statem:call(Fsm, getcount, 5000) of
 				Reply ->
 					{reply, {ok, Reply}, State}
+			catch
+				exit:Reason ->
+					{reply, {error, Reason}, State}
 			end;
 		none ->
 			{reply, {error, not_found}, State}
