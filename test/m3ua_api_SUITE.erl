@@ -1355,16 +1355,19 @@ named_states(Name) ->
 	[State || {N, State} <- m3ua:asp_states(), N == Name].
 
 %% @hidden
-%% 	The states of `Name' once it carries no association.
+%% 	The states of `Name' once the association it carried has ended and
+%% 	been counted. The state machine takes its row away as it
+%% 	terminates, and the endpoint counts the end when the exit reaches
+%% 	it, after: a read between the two sees neither.
 gone(Name, 0) ->
 	named_states(Name);
 gone(Name, N) ->
 	case named_states(Name) of
-		[#{assoc_state := up}] ->
+		[#{assoc_state := down, ended := Ended}] = States when Ended > 0 ->
+			States;
+		_ ->
 			ct:sleep(50),
-			gone(Name, N - 1);
-		States ->
-			States
+			gone(Name, N - 1)
 	end.
 
 %% @hidden
@@ -1931,13 +1934,16 @@ sg_state_active(_Config) ->
 	true = is_all_state(inactive, Asps3),
 	3 = length(Asps3),
 	ok = rpc:call(AsNode, m3ua, asp_active, [ClientEP1, Assoc1]),
-	#m3ua_as{state = inactive, asp = Asps4} = get_as(RC),
+	#m3ua_as{state = inactive, asp = Asps4} = as_until(RC,
+			fun(#m3ua_as{asp = A}) -> count_state(active, A) == 1 end),
 	1 = count_state(active, Asps4),
 	ok = rpc:call(AsNode, m3ua, asp_active, [ClientEP2, Assoc2]),
-	#m3ua_as{state = inactive, asp = Asps5} = get_as(RC),
+	#m3ua_as{state = inactive, asp = Asps5} = as_until(RC,
+			fun(#m3ua_as{asp = A}) -> count_state(active, A) == 2 end),
 	2 = count_state(active, Asps5),
 	ok = rpc:call(AsNode, m3ua, asp_active, [ClientEP3, Assoc3]),
-	#m3ua_as{state = active, asp = Asps6} = get_as(RC),
+	#m3ua_as{state = active, asp = Asps6} = as_until(RC,
+			fun(#m3ua_as{asp = A}) -> count_state(active, A) == 3 end),
 	3 = count_state(active, Asps6),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP1]),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP2]),
@@ -2058,14 +2064,17 @@ sg_state_down(_Config) ->
 	ok = rpc:call(AsNode, m3ua, asp_active, [ClientEP1, Assoc1]),
 	ok = rpc:call(AsNode, m3ua, asp_active, [ClientEP2, Assoc2]),
 	ok = rpc:call(AsNode, m3ua, asp_active, [ClientEP3, Assoc3]),
-	#m3ua_as{state = active, asp = Asps1} = get_as(RC),
+	#m3ua_as{state = active, asp = Asps1} = as_until(RC,
+			fun(#m3ua_as{asp = A}) -> count_state(active, A) == 3 end),
 	true = is_all_state(active, Asps1),
 	ok = rpc:call(AsNode, m3ua, asp_down, [ClientEP1, Assoc1]),
 	ok = rpc:call(AsNode, m3ua, asp_down, [ClientEP2, Assoc2]),
-	#m3ua_as{state = active, asp = Asps2} = get_as(RC),
+	#m3ua_as{state = active, asp = Asps2} = as_until(RC,
+			fun(#m3ua_as{asp = A}) -> count_state(active, A) == 1 end),
 	1 = count_state(active, Asps2),
 	ok = rpc:call(AsNode, m3ua, asp_down, [ClientEP3, Assoc3]),
-	#m3ua_as{state = down, asp = Asps3} = get_as(RC),
+	#m3ua_as{state = down, asp = Asps3} = as_until(RC,
+			fun(#m3ua_as{state = S}) -> S == down end),
 	true = is_all_state(down, Asps3),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP1]),
 	ok = rpc:call(AsNode, m3ua, stop, [ClientEP2]),
@@ -2227,6 +2236,26 @@ count_state(IsAspState, Asps) ->
 				Acc
 	end,
 	lists:foldl(F, 0, Asps).
+
+%% @hidden
+%% 	The application server of `RC' once `F' holds of it, or as it is
+%% 	after two seconds. The gateway acknowledges an ASPAC or ASPDN
+%% 	before it records what follows from it, so a read straight after
+%% 	the acknowledgement may come too soon.
+as_until(RC, F) ->
+	as_until(RC, F, 40).
+%% @hidden
+as_until(RC, _F, 0) ->
+	get_as(RC);
+as_until(RC, F, N) ->
+	AS = get_as(RC),
+	case F(AS) of
+		true ->
+			AS;
+		false ->
+			ct:sleep(50),
+			as_until(RC, F, N - 1)
+	end.
 
 get_as(RC) ->
 	F = fun() ->
