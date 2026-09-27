@@ -469,7 +469,10 @@ init([Socket, Address, Port,
 %% @hidden
 init1([{RC, RK, Name} | T], StateData, Acc) ->
 	case reg_tables(RC, RK, Name, down) of
-		{ok, AsState} ->
+		{ok, AsState, _Notify} ->
+			%% Nobody is told here. A cast to this process would cancel
+			%% the zero timeout that announces it, and the members that
+			%% are up were told of the state they brought about.
 			init1(T, StateData, [{RC, RK, AsState} | Acc]);
 		{error, Reason} ->
 			{stop, Reason}
@@ -1070,7 +1073,8 @@ handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
 	SortedKeys = m3ua:sort(Keys),
 	RK = {NA, SortedKeys, Mode},
 	case reg_tables(RC, RK, AS, StateName) of
-		{ok, AsState} ->
+		{ok, AsState, Notify} ->
+			ok = notify(RC, Notify),
 			NewRKs = lists:keystore(RC, 1, RKs, {RC, RK, AsState}),
 			CbArgs = [RC, NA, SortedKeys, Mode, CbState],
 			{ok, NewCbState} = m3ua_callback:cb(register, CbMod, CbArgs),
@@ -1772,41 +1776,97 @@ routing_context(RC, Params) ->
 		TMT :: m3ua:tmt(),
 		Name :: term(),
 		AspState :: down | inactive | active,
-		Result :: {ok, AsState} | {error, Reason},
+		Result :: {ok, AsState, Notify} | {error, Reason},
 		AsState :: down | inactive | active | pending,
+		Notify :: [{Fsm :: pid(), AsState}],
 		Reason :: term().
 %% @hidden
+%% 	Put this asp in the application server of `RC', in `AspState'.
+%% 	`Notify' names each member to be told the server's new state, and
+%% 	is empty where it has none.
 reg_tables(RC, RK, Name, AspState) ->
 	Fsm = self(),
 	F = fun() ->
-			case mnesia:read(m3ua_as, RC, write) of
+			AS = case mnesia:read(m3ua_as, RC, write) of
 				[] ->
-					ASPs = [#m3ua_as_asp{fsm = Fsm, state = AspState}],
-					AS = #m3ua_as{rc = RC, rk = RK, name = Name, asp = ASPs},
-					mnesia:write(AS),
-					ASP = #m3ua_asp{fsm = Fsm, rc = RC, rk = RK},
-					mnesia:write(ASP),
-					AS#m3ua_as.state;
-				[#m3ua_as{asp = ASPs} = AS] ->
-					NewASPs = case lists:keymember(Fsm, #m3ua_as_asp.fsm, ASPs) of
-						true ->
-							ASPs;
-						false ->
-							[#m3ua_as_asp{fsm = Fsm, state = AspState} | ASPs]
-					end,
-					NewAS = AS#m3ua_as{rk = RK, name = Name, asp = NewASPs},
-					mnesia:write(NewAS),
-					ASP = #m3ua_asp{fsm = Fsm, rc = RC, rk = RK},
-					mnesia:write(ASP),
-					NewAS#m3ua_as.state
-			end
+					#m3ua_as{rc = RC};
+				[#m3ua_as{} = AS0] ->
+					AS0
+			end,
+			#m3ua_as{asp = ASPs, state = AsState, min_asp = Min} = AS,
+			NewASPs = case lists:keymember(Fsm, #m3ua_as_asp.fsm, ASPs) of
+				true ->
+					ASPs;
+				false ->
+					[#m3ua_as_asp{fsm = Fsm, state = AspState} | ASPs]
+			end,
+			NewAsState = raise_as_state(AsState, NewASPs, Min),
+			NewAS = AS#m3ua_as{rk = RK, name = Name, asp = NewASPs,
+					state = NewAsState},
+			mnesia:write(NewAS),
+			ASP = #m3ua_asp{fsm = Fsm, rc = RC, rk = RK},
+			mnesia:write(ASP),
+			Notify = case NewAsState of
+				AsState ->
+					[];
+				_ ->
+					[{Member, NewAsState}
+							|| #m3ua_as_asp{fsm = Member} <- NewASPs]
+			end,
+			{NewAsState, Notify}
 	end,
 	case mnesia:transaction(F) of
-		{atomic, AsState} ->
-			{ok, AsState};
+		{atomic, {Joined, Told}} ->
+			{ok, Joined, Told};
 		{aborted, Reason} ->
 			{error, Reason}
 	end.
+
+%% @hidden
+%% 	The state an application server is raised to by a member joining
+%% 	it in a state of its own -- a registration by layer management,
+%% 	which may come after the asp's ASPAC. That used to leave the record
+%% 	down with an active asp in it until the next ASPAC or ASPIA. Only
+%% 	raised here: lowering it is for the ASPIA, ASPDN and deregistration
+%% 	that take a member out of service (state_traffic_maint2/2 and
+%% 	deregister1/3), which also hold an active server with fewer active
+%% 	asps than its minimum where this, starting from nothing, would not.
+raise_as_state(AsState, ASPs, Min) ->
+	NumActive = length([A || #m3ua_as_asp{state = active} = A <- ASPs]),
+	NumUp = length([A || #m3ua_as_asp{state = S} = A <- ASPs, S /= down]),
+	Joined = if
+		NumActive > 0, NumActive >= Min ->
+			active;
+		NumUp > 0 ->
+			inactive;
+		true ->
+			down
+	end,
+	case as_rank(Joined) > as_rank(AsState) of
+		true ->
+			Joined;
+		false ->
+			AsState
+	end.
+
+%% @hidden
+%% 	Tell each member of the application server of `RC' of its new
+%% 	state, as state_traffic_maint1/3 does.
+notify(RC, Notify) ->
+	F = fun({Fsm, active}) ->
+				gen_statem:cast(Fsm, {'M-NOTIFY', as_active, RC});
+			({Fsm, pending}) ->
+				gen_statem:cast(Fsm, {'M-NOTIFY', as_pending, RC});
+			({Fsm, _}) ->
+				gen_statem:cast(Fsm, {'M-NOTIFY', as_inactive, RC})
+	end,
+	lists:foreach(F, Notify).
+
+%% @hidden
+as_rank(down) -> 0;
+as_rank(inactive) -> 1;
+as_rank(pending) -> 1;
+as_rank(active) -> 2.
 
 %% @hidden
 %% 	RFC4666, Sections 4.3.4.1 and 4.3.4.2: an ASP DOWN, or an ASP UP at

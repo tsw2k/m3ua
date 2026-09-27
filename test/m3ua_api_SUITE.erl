@@ -106,7 +106,7 @@ all() ->
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
-			sgp_transfer_rc,
+			sgp_transfer_rc, sgp_static_register,
 			sgp_deregister_local, sgp_deregister_named, asp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
@@ -576,6 +576,38 @@ sgp_transfer_rc(_Config) ->
 	true = is_integer(Stream) andalso Stream > 0,
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+sgp_static_register() ->
+	[{userdata, [{doc, "A routing key registered by layer management at a static gateway after ASPAC makes its application server active at once, and says so."}]}].
+
+sgp_static_register(_Config) ->
+	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+			[{role, sgp}, {static, true}, {ip, {127,0,0,1}}]),
+	{_, server, sgp, {_, Port}} = m3ua:get_ep(EP),
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	{ok, #sctp_assoc_change{state = comm_up, assoc_id = PeerAssoc}} =
+			gen_sctp:connect(Peer, {127,0,0,1}, Port, []),
+	[Assoc] = assoc(EP, 40),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPAC)),
+	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPACACK),
+	active = m3ua:asp_status(EP, Assoc),
+	%% Configured, and joined only now, the way a gateway learns of a
+	%% peer with a static key: after it has gone active.
+	RC = unused_rc(),
+	Name = make_ref(),
+	Keys = [{rand:uniform(16383), [], []}],
+	{ok, _} = m3ua:as_add(Name, RC, undefined, Keys, loadshare, 1, 1),
+	{ok, RC} = m3ua:register(EP, Assoc, RC, undefined, Keys, loadshare, Name),
+	[#m3ua_as{state = active, asp = [#m3ua_as_asp{state = active}]}] =
+			mnesia:dirty_read(m3ua_as, RC),
+	#m3ua{class = ?MGMTMessage, type = ?MGMTNotify, params = Params} = raw_get(Peer),
+	as_active = m3ua_codec:fetch_parameter(?Status,
+			m3ua_codec:parameters(Params)),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer),
+	ok = m3ua:as_delete(RC).
 
 %% @hidden
 %% 	The stream the next DATA arrives on, passing over the NTFY an sgp
