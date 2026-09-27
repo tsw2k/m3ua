@@ -529,7 +529,7 @@ active({'MTP-TRANSFER', request, Ref, From,
 		Stream when is_integer(Stream) ->
 			Stream;
 		undefined ->
-			SLS rem NumStreams
+			data_stream(SLS, NumStreams)
 	end,
 	case gen_sctp:send(Socket, Assoc, Stream1, Packet) of
 		ok ->
@@ -591,7 +591,7 @@ active({'MTP-TRANSFER', request, {Stream, RC, OPC, DPC, NI, SI, SLS, Data}},
 		Stream when is_integer(Stream) ->
 			Stream;
 		undefined ->
-			SLS rem NumStreams
+			data_stream(SLS, NumStreams)
 	end,
 	case gen_sctp:send(Socket, Assoc, Stream1, Packet) of
 		ok ->
@@ -1282,6 +1282,25 @@ get_rc(DPC, OPC, SI, [{RC, RK, _} | T] = _RKs)
 		false ->
 			get_rc(DPC, OPC, SI, T)
 	end.
+
+-spec data_stream(SLS, NumStreams) -> Stream
+	when
+		SLS :: byte(),
+		NumStreams :: non_neg_integer(),
+		Stream :: non_neg_integer().
+%% @doc The stream a DATA goes on when the caller named none.
+%%
+%% 	RFC4666, Section-1.4.7: "The DATA message MUST NOT be sent on stream
+%% 	0." `SLS rem NumStreams' put an SLS of 0, and every multiple of the
+%% 	stream count, on stream 0. The SLS spreads over streams 1 to
+%% 	NumStreams - 1 instead. An association with a single outbound
+%% 	stream has no other: DATA still goes on stream 0 there, against the
+%% 	rule, rather than nowhere.
+%% @hidden
+data_stream(SLS, NumStreams) when NumStreams > 1 ->
+	1 + SLS rem (NumStreams - 1);
+data_stream(_SLS, _NumStreams) ->
+	0.
 
 -spec reg_tables(RC, RK, Name, AspState) -> Result
 	when
