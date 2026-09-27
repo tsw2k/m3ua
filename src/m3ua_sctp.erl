@@ -74,6 +74,9 @@
 		controlling_process/2, send/5, recvmsg/2, sockname/1,
 		getstat/1, getstat/2, status/2, ppid/1, error_string/1]).
 
+%% @private
+-export([timers/1]).
+
 -include("m3ua.hrl").
 -include_lib("kernel/include/inet_sctp.hrl").
 
@@ -84,8 +87,10 @@
 %% for a handful of SCTP options and not for these, so they go through
 %% setopt_native/getopt_native by number.
 -define(SOL_SCTP, 132).
+-define(SCTP_RTOINFO, 0).
 -define(SCTP_NODELAY, 3).
 -define(SCTP_ADAPTATION_LAYER, 7).
+-define(SCTP_PEER_ADDR_PARAMS, 9).
 -define(SCTP_DEFAULT_SEND_PARAM, 10).
 -define(SCTP_EVENTS, 11).
 -define(SCTP_STATUS, 14).
@@ -119,6 +124,25 @@
 %% is read for are cross-checked against inet:getopts/2 on the same
 %% association.
 -define(STATUS_SIZE, 176).
+
+%% spp_flags in `struct sctp_paddrparams'.
+-define(SPP_HB_ENABLE, 1).
+
+%% The SCTP timers of the Cisco ITP, which the node replaces, and which
+%% NG-STP's m2pa took first (mtxc-stp 90203c9): RTO.Min = RTO.Max, so
+%% that a peer that stops answering is given up in Assoc.Max.Retrans
+%% times a second -- about ten -- rather than after the doubling up to
+%% the kernel's 60 s RTO.Max has run its course, which takes minutes;
+%% the INIT likewise, which on Linux backs off to max_init_timeo and not
+%% to RTO.Max; and a path of a multi-homed peer given up after four
+%% retransmissions rather than five. Measured by the M2PA session: an
+%% RTO under the peer's delayed SACK, 200 ms, retransmits what was only
+%% waiting to be acknowledged, so a second is well clear of it. The
+%% heartbeat is the ITP's and the kernel's alike.
+-define(RTO, 1000).
+-define(INIT_TIMEOUT, 1000).
+-define(PATH_MAX_RETRANS, 4).
+-define(HB_INTERVAL, 30000).
 
 %%----------------------------------------------------------------------
 %%  The m3ua_sctp API
@@ -479,8 +503,79 @@ setopt(Socket, {sctp_default_send_param, #sctp_sndrcvinfo{} = Info}) ->
 	%% call this from and the only place it takes effect.
 	socket:setopt_native(Socket,
 			{?SOL_SCTP, ?SCTP_DEFAULT_SEND_PARAM}, sndrcvinfo(Info));
+setopt(Socket, {sctp_rtoinfo, #sctp_rtoinfo{initial = Initial,
+		max = Max, min = Min}}) ->
+	%% Association id 0 is the socket's own defaults, which every
+	%% association it has from then on takes; a peeled-off one keeps
+	%% them. A zero leaves the kernel's value.
+	socket:setopt_native(Socket, {?SOL_SCTP, ?SCTP_RTOINFO},
+			<<0:32/native, (zero(Initial)):32/native, (zero(Max)):32/native,
+			(zero(Min)):32/native>>);
+setopt(Socket, {sctp_initmsg, #sctp_initmsg{num_ostreams = Out,
+		max_instreams = In, max_attempts = Attempts,
+		max_init_timeo = Timeout}}) ->
+	%% Read, modify, write: the socket module takes the whole struct,
+	%% and a field left undefined keeps what the kernel has.
+	case socket:getopt(Socket, {sctp, initmsg}) of
+		{ok, Current} ->
+			Fields = [{num_outstreams, Out}, {max_instreams, In},
+					{max_attempts, Attempts}, {max_init_timeo, Timeout}],
+			New = maps:merge(Current,
+					maps:from_list([F || {_, V} = F <- Fields, V /= undefined])),
+			socket:setopt(Socket, {sctp, initmsg}, New);
+		{error, _Reason} = Error ->
+			Error
+	end;
+setopt(Socket, {sctp_peer_addr_params, #sctp_paddrparams{address = undefined,
+		hbinterval = Interval, pathmaxrxt = Retrans, pathmtu = undefined,
+		sackdelay = undefined, flags = undefined}}) ->
+	%% Every path of every association the socket will have: association
+	%% id 0 and the wildcard address. `struct sctp_paddrparams' is
+	%% packed: the association id, a 128-octet `sockaddr_storage',
+	%% HB.interval, Path.Max.Retrans in 16 bits, the path MTU, the SACK
+	%% delay and the flags, 150 octets aligned to 152 -- the size the
+	%% kernel took before it grew a flow label and a DSCP, and still
+	%% takes (read back by the M2PA session). Only these two fields are
+	%% offered; a record naming any other is refused below rather than
+	%% half applied. HB.interval is read only with SPP_HB_ENABLE.
+	Flags = case zero(Interval) of
+		0 ->
+			0;
+		_ ->
+			?SPP_HB_ENABLE
+	end,
+	socket:setopt_native(Socket, {?SOL_SCTP, ?SCTP_PEER_ADDR_PARAMS},
+			<<0:32/native, 0:1024, (zero(Interval)):32/native,
+			(zero(Retrans)):16/native, 0:32/native, 0:32/native,
+			Flags:32/native, 0:16>>);
 setopt(_Socket, _Option) ->
 	{error, enoprotoopt}.
+
+-spec timers(Options) -> Options
+	when
+		Options :: [tuple() | atom()].
+%% @doc The ITP's SCTP timers, each unless `Options' names its own.
+%% 	Both endpoints open their sockets with them; see ?RTO.
+%% @private
+timers(Options) ->
+	Defaults = [{sctp_rtoinfo, #sctp_rtoinfo{initial = ?RTO,
+					max = ?RTO, min = ?RTO}},
+			{sctp_initmsg, #sctp_initmsg{max_init_timeo = ?INIT_TIMEOUT}},
+			{sctp_peer_addr_params, #sctp_paddrparams{
+					hbinterval = ?HB_INTERVAL, pathmaxrxt = ?PATH_MAX_RETRANS}}],
+	F = fun({Key, _} = Default, Acc) ->
+				case lists:keymember(Key, 1, Acc) of
+					true ->
+						Acc;
+					false ->
+						[Default | Acc]
+				end
+	end,
+	lists:foldl(F, Options, Defaults).
+
+%% @hidden
+zero(undefined) -> 0;
+zero(N) when is_integer(N) -> N.
 
 %% @hidden
 %% 	`struct sctp_event_subscribe' is eleven octets, one per event, in

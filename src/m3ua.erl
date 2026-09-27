@@ -66,6 +66,12 @@
 %% 	<dt>cb_opts</dt>
 %% 		<dd>Additional information provided to the callback module in
 %% 		it's `init/1' callback function.</dd>
+%% 	<dt>sctp_rtoinfo, sctp_initmsg, sctp_peer_addr_params</dt>
+%% 		<dd>As for {@link //kernel/gen_sctp. gen_sctp}. Each defaults to
+%% 		the Cisco ITP's SCTP timers: RTO initial, min and max 1000 ms,
+%% 		INIT timeout 1000 ms, Path.Max.Retrans 4, heartbeat 30000 ms.
+%% 		Of `#sctp_paddrparams{}' only `hbinterval' and `pathmaxrxt'
+%% 		may be given.</dd>
 %% </dl>
 
 -type tmt() :: override | loadshare | broadcast.

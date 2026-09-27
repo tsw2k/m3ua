@@ -129,7 +129,8 @@ init([Sup, Callback, Opts] = _Args) ->
 	case lists:keytake(connect, 1, Opts6) of
 		{value, {connect, Raddr, Rport, Ropts0}, O7} ->
 			{O8, Ropts} = device(O7, Ropts0),
-			Options = nodelay(buffered([{active, once}, {reuseaddr, true} | O8])),
+			Options = m3ua_sctp:timers(nodelay(buffered([{active, once},
+					{reuseaddr, true} | O8]))),
 			process_flag(trap_exit, true),
 			StateData = #statedata{sup = Sup, role = Role,
 					name = Name, static = Static, use_rc = UseRC,

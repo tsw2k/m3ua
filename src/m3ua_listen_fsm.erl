@@ -120,7 +120,8 @@ init([Sup, Callback, Opts] = _Args) ->
 		false ->
 			Opts5 ++ PpiOptions
 	end,
-	Options = nodelay(buffered([{active, once}, {reuseaddr, true} | Opts6])),
+	Options = m3ua_sctp:timers(nodelay(buffered([{active, once},
+			{reuseaddr, true} | Opts6]))),
 	try
 		case m3ua_sctp:open(Options) of
 			{ok, Socket} ->

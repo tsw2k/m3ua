@@ -36,6 +36,11 @@ set on the socket, and one that `m3ua_sctp` cannot set is an error naming it:
 the endpoint logs *Connect failed* and tries again, rather than coming up
 without it. `sctp_nodelay` is on unless `{sctp_nodelay, false}` is given:
 with Nagle on, a message can wait for the peer's delayed SACK, 200 ms.
+The SCTP timers are the Cisco ITP's unless given: RTO initial, min and max
+1000 ms, INIT timeout 1000 ms (`sctp_rtoinfo`, `sctp_initmsg`), Path.Max.Retrans
+4 and heartbeat 30 s (`sctp_peer_addr_params`, of which only `hbinterval` and
+`pathmaxrxt` are taken). A peer that stops answering is given up in about ten
+seconds, not after the kernel's RTO has doubled its way to 60 s.
 
 **Messages from the peer.** One the stack cannot use no longer ends the
 association:

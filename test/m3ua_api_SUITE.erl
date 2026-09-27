@@ -96,7 +96,7 @@ sequences() ->
 %%
 all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
-			connect_options, connect_device, stop_endpoint, lm_stray,
+			connect_options, connect_device, sctp_timers, stop_endpoint, lm_stray,
 			reconnect_in_place,
 			listen_not_accepted, connect_not_taken, asp_states,
 			endpoint_gives_up, lm_restart, callback_raised, asp_up_ack_unexpected,
@@ -914,6 +914,31 @@ raw_get(Peer) ->
 		1000 ->
 			nothing_sent
 	end.
+
+sctp_timers() ->
+	[{userdata, [{doc, "Sockets take the ITP's SCTP timers unless the options name others, and a peer address option that asks for more than is offered is refused."}]}].
+
+sctp_timers(_Config) ->
+	%% The defaults, read back from the socket.
+	{ok, Sock1} = m3ua_sctp:open(m3ua_sctp:timers([{ip, {127,0,0,1}}])),
+	{ok, <<_:32, 1000:32/native, 1000:32/native, 1000:32/native>>} =
+			socket:getopt_native(Sock1, {132, 0}, <<0:128>>),
+	{ok, <<_:32, _:1024, 30000:32/native, 4:16/native, _/binary>>} =
+			socket:getopt_native(Sock1, {132, 9}, <<0:(152 * 8)>>),
+	{ok, #{max_init_timeo := 1000}} = socket:getopt(Sock1, {sctp, initmsg}),
+	ok = m3ua_sctp:close(Sock1),
+	%% One named by the caller stands; the others are still defaulted.
+	RtoInfo = #sctp_rtoinfo{initial = 3000, max = 3000, min = 2000},
+	{ok, Sock2} = m3ua_sctp:open(m3ua_sctp:timers([{ip, {127,0,0,1}},
+			{sctp_rtoinfo, RtoInfo}])),
+	{ok, <<_:32, 3000:32/native, 3000:32/native, 2000:32/native>>} =
+			socket:getopt_native(Sock2, {132, 0}, <<0:128>>),
+	{ok, #{max_init_timeo := 1000}} = socket:getopt(Sock2, {sctp, initmsg}),
+	ok = m3ua_sctp:close(Sock2),
+	%% Only HB.interval and Path.Max.Retrans are offered.
+	Params = #sctp_paddrparams{sackdelay = 100},
+	{error, {{sctp_peer_addr_params, Params}, enoprotoopt}} =
+			m3ua_sctp:open([{ip, {127,0,0,1}}, {sctp_peer_addr_params, Params}]).
 
 connect_options() ->
 	[{userdata, [{doc, "The options given with connect reach the socket."}]}].
