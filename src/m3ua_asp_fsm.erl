@@ -532,7 +532,7 @@ down(timeout, _EventContent, #statedata{req = {AspOp, Ref, From}} = StateData)
 	{next_state, down, NewStateData};
 down(timeout, _EventContent, #statedata{ep = EP, assoc = Assoc, receiver = undefined,
 		socket = Socket, active = Active,
-		callback = CbMod, cb_state = CbState} = StateData) ->
+		cb_state = CbState} = StateData) ->
 	gen_server:cast(m3ua, {'M-SCTP_ESTABLISH', indication, self(), EP, Assoc}),
 	%% Reading starts here and not in init/1. This state is reached by
 	%% the zero timeout that init/1 asks for, and gen_statem cancels a
@@ -545,9 +545,9 @@ down(timeout, _EventContent, #statedata{ep = EP, assoc = Assoc, receiver = undef
 	Receiver = m3ua_receiver:start(Socket, self(), Active),
 	%% Not before: this message would cancel the zero timeout above.
 	_ = erlang:send_after(?PUBLISH_INTERVAL, self(), '$m3ua_publish'),
-	{ok, NewCbState} = m3ua_callback:cb(asp_down, CbMod, [CbState]),
+	{NewCbState, CbCount} = lifecycle(asp_down, [CbState], StateData),
 	{next_state, down, StateData#statedata{cb_state = NewCbState,
-			receiver = Receiver, lm = whereis(m3ua)}};
+			count = CbCount, receiver = Receiver, lm = whereis(m3ua)}};
 down(cast, {'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
 	handle_dereg(Event, down, StateData);
 down(cast, {'M-ASP_UP', request, Ref, From},
@@ -1060,8 +1060,13 @@ terminate1(Reason, _StateName, #statedata{rks = RKs} = StateData) ->
 %% @hidden
 terminate2(_, #statedata{callback = undefined}) ->
 	ok;
-terminate2(Reason, #statedata{callback = CbMod, cb_state = CbState}) ->
-	m3ua_callback:cb(terminate, CbMod, [Reason, CbState]).
+terminate2(Reason, #statedata{callback = CbMod, cb_state = CbState,
+		count = Count, ep = EP, assoc = Assoc}) ->
+	%% Ending anyway; an exception here would only replace the reason
+	%% it is ending for, and be logged as a crash of this process.
+	F = fun() -> m3ua_callback:cb(terminate, CbMod, [Reason, CbState]) end,
+	_ = contain1(terminate, F, ok, Count, EP, Assoc),
+	ok.
 
 -spec code_change(OldVsn :: term() | {down, term()}, StateName :: atom(),
 		StateData :: term(), Extra :: term()) ->
@@ -1196,7 +1201,7 @@ handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
 	end;
 handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
 		StateName, #statedata{static = true, rks = RKs, req = undefined,
-		assoc = Assoc, ep = EP, callback = CbMod,
+		assoc = Assoc, ep = EP,
 		cb_state = CbState} = StateData) when is_integer(RC) ->
 	SortedKeys = m3ua:sort(Keys),
 	RK = {NA, SortedKeys, Mode},
@@ -1204,9 +1209,9 @@ handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
 		{ok, AsState} ->
 			NewRKs = lists:keystore(RC, 1, RKs, {RC, RK, AsState}),
 			CbArgs = [RC, NA, SortedKeys, Mode, CbState],
-			{ok, NewCbState} = m3ua_callback:cb(register, CbMod, CbArgs),
+			{NewCbState, CbCount} = lifecycle(register, CbArgs, StateData),
 			NewStateData = StateData#statedata{rks = NewRKs,
-					cb_state = NewCbState},
+					cb_state = NewCbState, count = CbCount},
 			gen_server:cast(From,
 					{'M-RK_REG', confirm, Ref, {ok, RC}}),
 			{next_state, StateName, NewStateData};
@@ -1340,15 +1345,15 @@ handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK},
 	unexpected_up_ack(StateName, StateData);
 handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK, params = Params},
 		down, _Stream, #statedata{req = Request,
-		socket = _Socket, receiver = Receiver, active = Active, callback = CbMod, cb_state = CbState,
-		ep = EP, assoc = Assoc, count = Count} = StateData) ->
+		socket = _Socket, receiver = Receiver, active = Active, cb_state = CbState,
+		ep = EP, assoc = Assoc} = StateData) ->
 	AspUpAck = m3ua_codec:parameters(Params),
 	RCs = m3ua_codec:get_parameter(?RoutingContext, AspUpAck, undefined),
 	NewState = inactive,
 	case state_traffic_maint(RCs, NewState, StateData) of
 		ok ->
 			CbArgs = [CbState],
-			{ok, NewCbState} = m3ua_callback:cb(asp_up, CbMod, CbArgs),
+			{NewCbState, CbCount} = lifecycle(asp_up, CbArgs, StateData),
 			NewStateData = case Request of
 				{'M-ASP_UP', Ref, From} ->
 					gen_server:cast(From, {'M-ASP_UP', confirm, Ref, ok}),
@@ -1357,8 +1362,8 @@ handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK, params = Params},
 					StateData#statedata{cb_state = NewCbState}
 			end,
 			ok = m3ua_receiver:replenish(Receiver, Active),
-			UpAckIn = maps:get(up_ack_in, Count, 0),
-			NewCount = maps:put(up_ack_in, UpAckIn + 1, Count),
+			UpAckIn = maps:get(up_ack_in, CbCount, 0),
+			NewCount = maps:put(up_ack_in, UpAckIn + 1, CbCount),
 			NextStateData = NewStateData#statedata{count = NewCount},
 			{next_state, NewState, NextStateData};
 		{error, Reason} ->
@@ -1366,8 +1371,8 @@ handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK, params = Params},
 	end;
 handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDNACK, params = Params},
 		StateName, _Stream, #statedata{req = Request,
-		socket = _Socket, receiver = Receiver, active = Active, callback = CbMod, cb_state = CbState,
-		ep = EP, assoc = Assoc, count = Count} = StateData)
+		socket = _Socket, receiver = Receiver, active = Active, cb_state = CbState,
+		ep = EP, assoc = Assoc} = StateData)
 		when StateName == inactive; StateName == active ->
 	AspDownAck = m3ua_codec:parameters(Params),
 	RCs = m3ua_codec:get_parameter(?RoutingContext, AspDownAck, undefined),
@@ -1375,7 +1380,7 @@ handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDNACK, params = Params},
 	case state_traffic_maint(RCs, NewState, StateData) of
 		ok ->
 			CbArgs = [CbState],
-			{ok, NewCbState} = m3ua_callback:cb(asp_down, CbMod, CbArgs),
+			{NewCbState, CbCount} = lifecycle(asp_down, CbArgs, StateData),
 			NewStateData = case Request of
 				{'M-ASP_DOWN', Ref, From} ->
 					gen_server:cast(From, {'M-ASP_DOWN', confirm, Ref, ok}),
@@ -1384,8 +1389,8 @@ handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDNACK, params = Params},
 					StateData#statedata{cb_state = NewCbState}
 			end,
 			ok = m3ua_receiver:replenish(Receiver, Active),
-			DownAckIn = maps:get(down_ack_in, Count, 0),
-			NewCount = maps:put(down_ack_in, DownAckIn + 1, Count),
+			DownAckIn = maps:get(down_ack_in, CbCount, 0),
+			NewCount = maps:put(down_ack_in, DownAckIn + 1, CbCount),
 			NextStateData = NewStateData#statedata{count = NewCount},
 			report_carrying(StateName, NewState, EP, Assoc),
 			{next_state, NewState, NextStateData};
@@ -1394,15 +1399,15 @@ handle_asp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDNACK, params = Params},
 	end;
 handle_asp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPACACK, params = Params},
 		inactive, _Stream, #statedata{req = Request,
-		socket = _Socket, receiver = Receiver, active = Active, callback = CbMod, cb_state = CbState,
-		ep = EP, assoc = Assoc, count = Count} = StateData) ->
+		socket = _Socket, receiver = Receiver, active = Active, cb_state = CbState,
+		ep = EP, assoc = Assoc} = StateData) ->
 	AspActiveAck = m3ua_codec:parameters(Params),
 	RCs = m3ua_codec:get_parameter(?RoutingContext, AspActiveAck, undefined),
 	NewState = active,
 	case state_traffic_maint(RCs, NewState, StateData) of
 		ok ->
 			CbArgs = [CbState],
-			{ok, NewCbState} = m3ua_callback:cb(asp_active, CbMod, CbArgs),
+			{NewCbState, CbCount} = lifecycle(asp_active, CbArgs, StateData),
 			NewStateData = case Request of
 				{'M-ASP_ACTIVE', Ref, From} ->
 					gen_server:cast(From, {'M-ASP_ACTIVE', confirm, Ref, ok}),
@@ -1411,8 +1416,8 @@ handle_asp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPACACK, params = Params},
 					StateData#statedata{cb_state = NewCbState}
 			end,
 			ok = m3ua_receiver:replenish(Receiver, Active),
-			ActiveAckIn = maps:get(active_ack_in, Count, 0),
-			NewCount = maps:put(active_ack_in, ActiveAckIn + 1, Count),
+			ActiveAckIn = maps:get(active_ack_in, CbCount, 0),
+			NewCount = maps:put(active_ack_in, ActiveAckIn + 1, CbCount),
 			NextStateData = NewStateData#statedata{count = NewCount},
 			report_carrying(inactive, NewState, EP, Assoc),
 			{next_state, NewState, NextStateData};
@@ -1421,15 +1426,15 @@ handle_asp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPACACK, params = Params},
 	end;
 handle_asp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIAACK, params = Params},
 		active, _Stream, #statedata{req = Request, socket = _Socket,
-		receiver = Receiver, active = Active, callback = CbMod, cb_state = CbState,
-		ep = EP, assoc = Assoc, count = Count} = StateData) ->
+		receiver = Receiver, active = Active, cb_state = CbState,
+		ep = EP, assoc = Assoc} = StateData) ->
 	AspInactiveAck = m3ua_codec:parameters(Params),
 	RCs = m3ua_codec:get_parameter(?RoutingContext, AspInactiveAck, undefined),
 	NewState = inactive,
 	case state_traffic_maint(RCs, NewState, StateData) of
 		ok ->
 			CbArgs = [CbState],
-			{ok, NewCbState} = m3ua_callback:cb(asp_inactive, CbMod, CbArgs),
+			{NewCbState, CbCount} = lifecycle(asp_inactive, CbArgs, StateData),
 			NewStateData = case Request of
 				{'M-ASP_INACTIVE', Ref, From} ->
 					gen_server:cast(From, {'M-ASP_INACTIVE', confirm, Ref, ok}),
@@ -1438,8 +1443,8 @@ handle_asp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIAACK, params = Params},
 					StateData#statedata{cb_state = NewCbState}
 			end,
 			ok = m3ua_receiver:replenish(Receiver, Active),
-			InactiveAckIn = maps:get(inactive_ack_in, Count, 0),
-			NewCount = maps:put(inactive_ack_in, InactiveAckIn + 1, Count),
+			InactiveAckIn = maps:get(inactive_ack_in, CbCount, 0),
+			NewCount = maps:put(inactive_ack_in, InactiveAckIn + 1, CbCount),
 			NextStateData = NewStateData#statedata{count = NewCount},
 			report_carrying(active, NewState, EP, Assoc),
 			{next_state, NewState, NextStateData};
@@ -1451,7 +1456,7 @@ handle_asp(#m3ua{class = ?RKMMessage, type = ?RKMREGRSP, params = Params},
 		rks = RKs, req = {'M-RK_REG', Ref, From,
 		#m3ua_routing_key{na = NA, tmt = Mode, as = AS, key = Keys,
 		lrk_id = LrkId}},
-		callback = CbMod, cb_state = CbState, ep = EP,
+		cb_state = CbState, ep = EP,
 		assoc = Assoc, count = Count} = StateData)
 		when StateName == inactive; StateName == active ->
    Parameters = m3ua_codec:parameters(Params),
@@ -1467,11 +1472,11 @@ handle_asp(#m3ua{class = ?RKMMessage, type = ?RKMREGRSP, params = Params},
 				{ok, AsState} ->
 					NewRKs = lists:keystore(undefined, 1, RKs, {RC, RK, AsState}),
 					CbArgs = [RC, NA, Keys, Mode, CbState],
-					{ok, NewCbState} = m3ua_callback:cb(register, CbMod, CbArgs),
+					{NewCbState, CbCount} = lifecycle(register, CbArgs, StateData),
 					gen_server:cast(From, {'M-RK_REG', confirm, Ref, {ok, RC}}),
 					ok = m3ua_receiver:replenish(Receiver, Active),
 					NewStateData = StateData#statedata{req = undefined,
-							rks = NewRKs, cb_state = NewCbState},
+							rks = NewRKs, cb_state = NewCbState, count = CbCount},
 					{next_state, StateName, NewStateData};
 				{error, Reason1} ->
 					{stop, {shutdown, {{EP, Assoc}, Reason1}}, StateData}
@@ -1833,6 +1838,36 @@ contain1(Handler, F, Fallback, Count, EP, Assoc) ->
 	end.
 
 %% @hidden
+%% 	A callback of the association's own life: asp_up, asp_down,
+%% 	asp_active, asp_inactive and register. These used to be matched
+%% 	against {ok, State} and nothing else, so an exception in one, or
+%% 	any other answer -- register may answer {error, Reason} by its
+%% 	spec -- ended the association over what had already happened on
+%% 	the wire. Now an exception is said and counted as on the traffic
+%% 	path (contain1/6); an error from register is said at notice and
+%% 	the registration stands, as deregister/5's does; any other answer
+%% 	is a fault of the callback's, said at error and counted with the
+%% 	exceptions. In each case the state the callback had is kept.
+lifecycle(Handler, CbArgs, #statedata{callback = CbMod, cb_state = CbState,
+		count = Count, ep = EP, assoc = Assoc}) ->
+	F = fun() -> m3ua_callback:cb(Handler, CbMod, CbArgs) end,
+	case contain1(Handler, F, {ok, CbState}, Count, EP, Assoc) of
+		{{ok, NewCbState}, Count1} ->
+			{NewCbState, Count1};
+		{{error, Reason}, Count1} when Handler == register ->
+			?LOG_NOTICE("Registration refused by callback",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					rc => hd(CbArgs), reason => Reason}),
+			{CbState, Count1};
+		{Answer, Count1} ->
+			?LOG_ERROR("Callback answered outside its contract",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					callback => Handler, answer => Answer}),
+			Raised = maps:get(callback_raised, Count1, 0),
+			{CbState, maps:put(callback_raised, Raised + 1, Count1)}
+	end.
+
+%% @hidden
 %% 	An ASP UP ACK that answers no ASP UP. Inactive already, there is
 %% 	nothing to do. From down or active the asp takes itself to be
 %% 	inactive, as the RFC has it, says so with an ERR, and asks to be
@@ -1848,8 +1883,8 @@ unexpected_up_ack(inactive, #statedata{receiver = Receiver, active = Active,
 	UpAckIn = maps:get(up_ack_in, Count, 0),
 	NewCount = maps:put(up_ack_in, UpAckIn + 1, Count),
 	{next_state, inactive, StateData#statedata{count = NewCount}};
-unexpected_up_ack(Previous, #statedata{req = Request, callback = CbMod,
-		cb_state = CbState, ep = EP, assoc = Assoc, count = Count} = StateData) ->
+unexpected_up_ack(Previous, #statedata{req = Request,
+		cb_state = CbState, ep = EP, assoc = Assoc} = StateData) ->
 	?LOG_NOTICE("ASPUP ACK unexpected",
 			#{layer => m3ua, ep => EP, assoc => Assoc, state => Previous,
 			reason => unexpected_message}),
@@ -1861,7 +1896,7 @@ unexpected_up_ack(Previous, #statedata{req = Request, callback = CbMod,
 				active ->
 					asp_inactive
 			end,
-			{ok, NewCbState} = m3ua_callback:cb(Handler, CbMod, [CbState]),
+			{NewCbState, CbCount} = lifecycle(Handler, [CbState], StateData),
 			report_carrying(Previous, inactive, EP, Assoc),
 			{Return, NewRequest} = case {Previous, Request} of
 				{active, {'M-ASP_INACTIVE', Ref, From}} ->
@@ -1872,8 +1907,8 @@ unexpected_up_ack(Previous, #statedata{req = Request, callback = CbMod,
 				_ ->
 					{true, Request}
 			end,
-			UpAckIn = maps:get(up_ack_in, Count, 0),
-			NewCount = maps:put(up_ack_in, UpAckIn + 1, Count),
+			UpAckIn = maps:get(up_ack_in, CbCount, 0),
+			NewCount = maps:put(up_ack_in, UpAckIn + 1, CbCount),
 			NewStateData = StateData#statedata{req = NewRequest,
 					cb_state = NewCbState, count = NewCount},
 			case send_error(unexpected_message, inactive, NewStateData) of

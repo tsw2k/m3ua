@@ -106,7 +106,7 @@ all() ->
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
-			sgp_transfer_rc, sgp_static_register,
+			sgp_transfer_rc, sgp_static_register, lifecycle_contained,
 			sgp_deregister_local, sgp_deregister_named, asp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
@@ -608,6 +608,34 @@ sgp_static_register(_Config) ->
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer),
 	ok = m3ua:as_delete(RC).
+
+lifecycle_contained() ->
+	[{userdata, [{doc, "A callback of the association's own life that raises, refuses or answers wrongly costs the association nothing."}]}].
+
+lifecycle_contained(_Config) ->
+	Fup = fun(_State, _Pid) -> erlang:error(lifecycle_contained) end,
+	Fregister = fun(_RC, _NA, _Keys, _TMT, _State, _Pid) -> {error, refused} end,
+	Factive = fun(_State, _Pid) -> not_a_tuple end,
+	Fterminate = fun(_Reason, _State, _Pid) -> erlang:error(lifecycle_contained) end,
+	Callback = (callback(make_ref()))#m3ua_fsm_cb{asp_up = Fup,
+			register = Fregister, asp_active = Factive, terminate = Fterminate},
+	{Peer, PeerAssoc, EP, Assoc} = raw_asp(Callback),
+	%% Raised in asp_up: acknowledged, and inactive all the same.
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	inactive = m3ua:asp_status(EP, Assoc),
+	%% Refused by register: the registration stands.
+	RC = raw_register(Peer, PeerAssoc),
+	[_] = as_asps(RC),
+	%% Answered wrongly by asp_active: active all the same.
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPAC)),
+	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPACACK),
+	active = m3ua:asp_status(EP, Assoc),
+	{ok, #{callback_raised := 2, up_in := 1, active_in := 1}}
+			= m3ua:getcount(EP, Assoc),
+	%% Raised in terminate: stopped all the same.
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
 
 %% @hidden
 %% 	The stream the next DATA arrives on, passing over the NTFY an sgp

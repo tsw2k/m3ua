@@ -93,9 +93,12 @@ association:
   for instead of dying of it;
 - an exception raised by a callback on the traffic path (`recv`, `send`,
   `info`, the SSNM and NTFY callbacks) costs that one message: it is logged,
-  counted, and the association goes on. The callbacks of the association's
-  own life (`init`, `asp_up` and the rest, `register`, `terminate`) are not
-  contained.
+  counted, and the association goes on. So does one raised by a callback of
+  the association's own life (`asp_up` and the rest, `register`,
+  `terminate`), or any answer from one outside its contract; the state the
+  callback had is kept. `register` answering `{error, Reason}` is said at
+  notice and the registration stands. `init` refusing or raising costs that
+  association alone (see above).
 
 **Counters.** `m3ua:getcount(EndPoint, Assoc)` has, besides upstream's:
 `undecodable_in`, `unexpected_in`, `error_in`, `error_out`, `callback_raised`,

@@ -173,6 +173,10 @@ audit(_Stream, _RCs, _APCs, State) ->
 		Result :: {ok, NewState} | {error, Reason},
 		NewState :: term(),
 		Reason :: term().
+%% @doc A routing key was registered: by REG REQ or RSP, or by
+%% 	m3ua:register/6,7. The registration has happened by then, so
+%% 	`{error, Reason}' undoes nothing: it is said at notice and the
+%% 	callback's state is kept. The default takes no action.
 register(_RC, _NA, _Keys, _TMT, State) ->
 	{ok, State}.
 

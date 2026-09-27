@@ -496,7 +496,7 @@ down(enter, _OldStateName, StateData) ->
 	keep_state_and_data;
 down(timeout, _EventContent, #statedata{ep = EP, assoc = Assoc, receiver = undefined,
 		socket = Socket, active = Active,
-		callback = CbMod, cb_state = CbState} = StateData) ->
+		cb_state = CbState} = StateData) ->
 	gen_server:cast(m3ua, {'M-SCTP_ESTABLISH', indication, self(), EP, Assoc}),
 	%% Reading starts here and not in init/1. This state is reached by
 	%% the zero timeout that init/1 asks for, and gen_statem cancels a
@@ -509,9 +509,9 @@ down(timeout, _EventContent, #statedata{ep = EP, assoc = Assoc, receiver = undef
 	Receiver = m3ua_receiver:start(Socket, self(), Active),
 	%% Not before: this message would cancel the zero timeout above.
 	_ = erlang:send_after(?PUBLISH_INTERVAL, self(), '$m3ua_publish'),
-	{ok, NewCbState} = m3ua_callback:cb(asp_down, CbMod, [CbState]),
+	{NewCbState, CbCount} = lifecycle(asp_down, [CbState], StateData),
 	{next_state, down, StateData#statedata{cb_state = NewCbState,
-			receiver = Receiver, lm = whereis(m3ua)}};
+			count = CbCount, receiver = Receiver, lm = whereis(m3ua)}};
 down(cast, {'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
 	handle_dereg(Event, down, StateData);
 down({call, From}, {'MTP-TRANSFER', request, _Params},
@@ -895,8 +895,13 @@ terminate1(Reason, _StateName, #statedata{rks = RKs, registered = Registered,
 %% @hidden
 terminate2(_, #statedata{callback = undefined}) ->
 	ok;
-terminate2(Reason, #statedata{callback = CbMod, cb_state = CbState}) ->
-	m3ua_callback:cb(terminate, CbMod, [Reason, CbState]).
+terminate2(Reason, #statedata{callback = CbMod, cb_state = CbState,
+		count = Count, ep = EP, assoc = Assoc}) ->
+	%% Ending anyway; an exception here would only replace the reason
+	%% it is ending for, and be logged as a crash of this process.
+	F = fun() -> m3ua_callback:cb(terminate, CbMod, [Reason, CbState]) end,
+	_ = contain1(terminate, F, ok, Count, EP, Assoc),
+	ok.
 
 -spec code_change(OldVsn :: term() | {down, term()}, StateName :: atom(),
 		StateData :: term(), Extra :: term()) ->
@@ -1068,7 +1073,7 @@ report_discarding(Cb, EP, Assoc) ->
 %% @hidden
 handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
 		StateName, #statedata{static = true, rks = RKs,
-		assoc = Assoc, ep = EP, callback = CbMod,
+		assoc = Assoc, ep = EP,
 		cb_state = CbState} = StateData) when is_integer(RC) ->
 	SortedKeys = m3ua:sort(Keys),
 	RK = {NA, SortedKeys, Mode},
@@ -1077,9 +1082,9 @@ handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
 			ok = notify(RC, Notify),
 			NewRKs = lists:keystore(RC, 1, RKs, {RC, RK, AsState}),
 			CbArgs = [RC, NA, SortedKeys, Mode, CbState],
-			{ok, NewCbState} = m3ua_callback:cb(register, CbMod, CbArgs),
+			{NewCbState, CbCount} = lifecycle(register, CbArgs, StateData),
 			NewStateData = StateData#statedata{rks = NewRKs,
-					cb_state = NewCbState},
+					cb_state = NewCbState, count = CbCount},
 			gen_server:cast(From, {'M-RK_REG', confirm, Ref, {ok, RC}}),
 			{next_state, StateName, NewStateData};
 		{error, Reason} ->
@@ -1131,8 +1136,7 @@ handle_sgp(M3UA, StateName, Stream, StateData) when is_binary(M3UA) ->
 	end;
 handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP, params = Params},
 		down, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active,
-		assoc = Assoc, ep = EP, callback = CbMod, cb_state = CbState,
-		count = Count} = StateData) ->
+		assoc = Assoc, ep = EP, cb_state = CbState} = StateData) ->
 	AspUp = m3ua_codec:parameters(Params),
 	RCs = m3ua_codec:get_parameter(?RoutingContext, AspUp, undefined),
 	AspUpAck = #m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK},
@@ -1141,11 +1145,11 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP, params = Params},
 		ok ->
 			NewStateData = state_traffic_maint(RCs, asp_up, StateData),
 			CbArgs = [CbState],
-			{ok, NewCbState} = m3ua_callback:cb(asp_up, CbMod, CbArgs),
+			{NewCbState, CbCount} = lifecycle(asp_up, CbArgs, StateData),
 			ok = m3ua_receiver:replenish(Receiver, Active),
-			UpIn = maps:get(up_in, Count, 0),
-			UpAckOut = maps:get(up_ack_out, Count, 0),
-			NewCount = maps:put(up_in, UpIn + 1, Count),
+			UpIn = maps:get(up_in, CbCount, 0),
+			UpAckOut = maps:get(up_ack_out, CbCount, 0),
+			NewCount = maps:put(up_in, UpIn + 1, CbCount),
 			NextCount = maps:put(up_ack_out, UpAckOut + 1, NewCount),
 			NextStateData = NewStateData#statedata{cb_state = NewCbState,
 					count = NextCount},
@@ -1187,8 +1191,7 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP},
 %% application server it is in, and deregisters its routing keys.
 handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP},
 		active, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid,
-		assoc = Assoc, ep = EP, callback = CbMod, cb_state = CbState,
-		count = Count} = StateData) ->
+		assoc = Assoc, ep = EP} = StateData) ->
 	?LOG_NOTICE("ASPUP received in the active state",
 			#{layer => m3ua, ep => EP, assoc => Assoc,
 			reason => unexpected_message}),
@@ -1198,11 +1201,12 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP},
 		ok ->
 			NewStateData = deregister(asp_up,
 					state_traffic_maint(undefined, asp_inactive, StateData)),
-			CbArgs = [CbState],
-			{ok, NewCbState} = m3ua_callback:cb(asp_inactive, CbMod, CbArgs),
-			UpIn = maps:get(up_in, Count, 0),
-			UpAckOut = maps:get(up_ack_out, Count, 0),
-			NewCount = maps:put(up_in, UpIn + 1, Count),
+			%% From NewStateData: deregistering told the callback too.
+			CbArgs = [NewStateData#statedata.cb_state],
+			{NewCbState, CbCount} = lifecycle(asp_inactive, CbArgs, NewStateData),
+			UpIn = maps:get(up_in, CbCount, 0),
+			UpAckOut = maps:get(up_ack_out, CbCount, 0),
+			NewCount = maps:put(up_in, UpIn + 1, CbCount),
 			NextCount = maps:put(up_ack_out, UpAckOut + 1, NewCount),
 			NextStateData = NewStateData#statedata{cb_state = NewCbState,
 					count = NextCount},
@@ -1228,8 +1232,7 @@ handle_sgp(#m3ua{class = ?RKMMessage, type = ?RKMDEREGREQ, params = Params},
 	dereg_request(RCs, StateName, StateData);
 handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC, params = Params},
 		inactive, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active,
-		assoc = Assoc, ep = EP, callback = CbMod, cb_state = CbState,
-		count = Count} = StateData) ->
+		assoc = Assoc, ep = EP, cb_state = CbState} = StateData) ->
 	AspActive = m3ua_codec:parameters(Params),
 	RCs = m3ua_codec:get_parameter(?RoutingContext, AspActive, undefined),
 	AspActiveAck = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPACACK},
@@ -1238,11 +1241,11 @@ handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC, params = Params},
 		ok ->
 			NewStateData = state_traffic_maint(RCs, asp_active, StateData),
 			CbArgs = [CbState],
-			{ok, NewCbState} = m3ua_callback:cb(asp_active, CbMod, CbArgs),
+			{NewCbState, CbCount} = lifecycle(asp_active, CbArgs, StateData),
 			ok = m3ua_receiver:replenish(Receiver, Active),
-			ActiveIn = maps:get(active_in, Count, 0),
-			ActiveAckOut = maps:get(active_ack_out, Count, 0),
-			NewCount = maps:put(active_in, ActiveIn + 1, Count),
+			ActiveIn = maps:get(active_in, CbCount, 0),
+			ActiveAckOut = maps:get(active_ack_out, CbCount, 0),
+			NewCount = maps:put(active_in, ActiveIn + 1, CbCount),
 			NextCount = maps:put(active_ack_out, ActiveAckOut + 1, NewCount),
 			NextStateData = NewStateData#statedata{cb_state = NewCbState,
 					count = NextCount},
@@ -1256,8 +1259,7 @@ handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC, params = Params},
 	end;
 handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN, params = Params},
 		StateName, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active,
-		assoc = Assoc, ep = EP, callback = CbMod, cb_state = CbState,
-		count = Count} = StateData)
+		assoc = Assoc, ep = EP} = StateData)
 		when StateName == inactive; StateName == active ->
 	AspDown = m3ua_codec:parameters(Params),
 	RCs = m3ua_codec:get_parameter(?RoutingContext, AspDown, undefined),
@@ -1267,12 +1269,13 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN, params = Params},
 		ok ->
 			NewStateData = deregister(asp_down,
 					state_traffic_maint(RCs, asp_down, StateData)),
-			CbArgs = [CbState],
-			{ok, NewCbState} = m3ua_callback:cb(asp_down, CbMod, CbArgs),
+			%% From NewStateData: deregistering told the callback too.
+			CbArgs = [NewStateData#statedata.cb_state],
+			{NewCbState, CbCount} = lifecycle(asp_down, CbArgs, NewStateData),
 			ok = m3ua_receiver:replenish(Receiver, Active),
-			DownIn = maps:get(down_in, Count, 0),
-			DownAckOut = maps:get(down_ack_out, Count, 0),
-			NewCount = maps:put(down_in, DownIn + 1, Count),
+			DownIn = maps:get(down_in, CbCount, 0),
+			DownAckOut = maps:get(down_ack_out, CbCount, 0),
+			NewCount = maps:put(down_in, DownIn + 1, CbCount),
 			NextCount = maps:put(down_ack_out, DownAckOut + 1, NewCount),
 			NextStateData = NewStateData#statedata{cb_state = NewCbState,
 					count = NextCount},
@@ -1286,8 +1289,7 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN, params = Params},
 	end;
 handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIA, params = Params},
 		active, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active,
-		assoc = Assoc, ep = EP, callback = CbMod, cb_state = CbState,
-		count = Count} = StateData) ->
+		assoc = Assoc, ep = EP, cb_state = CbState} = StateData) ->
 	AspInActive = m3ua_codec:parameters(Params),
 	RCs = m3ua_codec:get_parameter(?RoutingContext, AspInActive, undefined),
 	AspInActiveAck = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIAACK},
@@ -1296,11 +1298,11 @@ handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIA, params = Params},
 		ok ->
 			NewStateData = state_traffic_maint(RCs, asp_inactive, StateData),
 			CbArgs = [CbState],
-			{ok, NewCbState} = m3ua_callback:cb(asp_inactive, CbMod, CbArgs),
+			{NewCbState, CbCount} = lifecycle(asp_inactive, CbArgs, StateData),
 			ok = m3ua_receiver:replenish(Receiver, Active),
-			InactiveIn = maps:get(inactive_in, Count, 0),
-			InactiveAckOut = maps:get(inactive_ack_out, Count, 0),
-			NewCount = maps:put(inactive_in, InactiveIn + 1, Count),
+			InactiveIn = maps:get(inactive_in, CbCount, 0),
+			InactiveAckOut = maps:get(inactive_ack_out, CbCount, 0),
+			NewCount = maps:put(inactive_in, InactiveIn + 1, CbCount),
 			NextCount = maps:put(inactive_ack_out, InactiveAckOut + 1, NewCount),
 			NextStateData = NewStateData#statedata{cb_state = NewCbState,
 					count = NextCount},
@@ -1482,7 +1484,7 @@ reg_request(RoutingKeys, StateName, StateData) ->
 %% @hidden
 reg_request([H | T], StateName, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid,
 		receiver = Receiver, active = Active, ep = EP, assoc = Assoc, rks = RKs,
-		registered = Registered, callback = CbMod, cb_state = CbState,
+		registered = Registered, cb_state = CbState,
 		count = Count} = StateData, RegResults, Notifies) ->
 	try m3ua_codec:routing_key(H)
 	of
@@ -1495,19 +1497,19 @@ reg_request([H | T], StateName, #statedata{socket = Socket, peer_addr = PeerAddr
 				{atomic, {reg, AsState, #registration_result{rc = NewRC} = RR}} ->
 					NewRKs = update_rks(NewRC, RK, AsState, RKs),
 					CbArgs = [NewRC, NA, SortedKeys, Mode, CbState],
-					{ok, NewCbState} = m3ua_callback:cb(register, CbMod, CbArgs),
+					{NewCbState, CbCount} = lifecycle(register, CbArgs, StateData),
 					NewStateData = StateData#statedata{rks = NewRKs,
 							registered = [NewRC | lists:delete(NewRC, Registered)],
-							cb_state = NewCbState},
+							cb_state = NewCbState, count = CbCount},
 					RegResult = {?RegistrationResult, RR},
 					reg_request(T, StateName, NewStateData, [RegResult | RegResults], Notifies);
 				{atomic, {reg, AsState, #registration_result{rc = NewRC} = RR, Notify}} ->
 					NewRKs = update_rks(NewRC, RK, AsState, RKs),
 					CbArgs = [NewRC, NA, SortedKeys, Mode, CbState],
-					{ok, NewCbState} = m3ua_callback:cb(register, CbMod, CbArgs),
+					{NewCbState, CbCount} = lifecycle(register, CbArgs, StateData),
 					NewStateData = StateData#statedata{rks = NewRKs,
 							registered = [NewRC | lists:delete(NewRC, Registered)],
-							cb_state = NewCbState},
+							cb_state = NewCbState, count = CbCount},
 					RegResult = {?RegistrationResult, RR},
 					reg_request(T, StateName, NewStateData, [RegResult | RegResults], [Notify | Notifies]);
 				{atomic, {not_reg, AsState,
@@ -2043,6 +2045,36 @@ contain1(Handler, F, Fallback, Count, EP, Assoc) ->
 					stacktrace => Stacktrace}),
 			Raised = maps:get(callback_raised, Count, 0),
 			{Fallback, maps:put(callback_raised, Raised + 1, Count)}
+	end.
+
+%% @hidden
+%% 	A callback of the association's own life: asp_up, asp_down,
+%% 	asp_active, asp_inactive and register. These used to be matched
+%% 	against {ok, State} and nothing else, so an exception in one, or
+%% 	any other answer -- register may answer {error, Reason} by its
+%% 	spec -- ended the association over what had already happened on
+%% 	the wire. Now an exception is said and counted as on the traffic
+%% 	path (contain1/6); an error from register is said at notice and
+%% 	the registration stands, as deregister/5's does; any other answer
+%% 	is a fault of the callback's, said at error and counted with the
+%% 	exceptions. In each case the state the callback had is kept.
+lifecycle(Handler, CbArgs, #statedata{callback = CbMod, cb_state = CbState,
+		count = Count, ep = EP, assoc = Assoc}) ->
+	F = fun() -> m3ua_callback:cb(Handler, CbMod, CbArgs) end,
+	case contain1(Handler, F, {ok, CbState}, Count, EP, Assoc) of
+		{{ok, NewCbState}, Count1} ->
+			{NewCbState, Count1};
+		{{error, Reason}, Count1} when Handler == register ->
+			?LOG_NOTICE("Registration refused by callback",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					rc => hd(CbArgs), reason => Reason}),
+			{CbState, Count1};
+		{Answer, Count1} ->
+			?LOG_ERROR("Callback answered outside its contract",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					callback => Handler, answer => Answer}),
+			Raised = maps:get(callback_raised, Count1, 0),
+			{CbState, maps:put(callback_raised, Raised + 1, Count1)}
 	end.
 
 %% @hidden
