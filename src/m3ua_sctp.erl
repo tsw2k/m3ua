@@ -574,10 +574,6 @@ timers(Options) ->
 	lists:foldl(F, Options, Defaults).
 
 %% @hidden
-zero(undefined) -> 0;
-zero(N) when is_integer(N) -> N.
-
-%% @hidden
 %% 	`struct sctp_event_subscribe' is eleven octets, one per event, in
 %% 	the order the header declares them, and `Current' is what the
 %% 	socket already has. Only the fields the caller named are changed.
