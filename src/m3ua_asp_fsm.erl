@@ -935,6 +935,34 @@ handle_event({call, From}, {getstat, Options}, StateName,
 handle_event({call, From}, getcount, StateName,
 		#statedata{count = Counters} = StateData) ->
 	{next_state, StateName, StateData, {reply, From, Counters}};
+handle_event(cast, {'M-NOTIFY', AsState, RC}, StateName,
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	%% From a signalling gateway on this node: gateway and asp share the
+	%% m3ua_as table, so an asp that registered a routing key is in the
+	%% gateway's list of members of its application server, and is told
+	%% as the members are when the server's state changes. It is not for
+	%% the asp, which learns the state from its own peer's NTFY. This
+	%% used to end the association with a function_clause.
+	?LOG_DEBUG("Local notification ignored",
+			#{layer => m3ua, ep => EP, assoc => Assoc, rc => RC,
+			as_state => AsState, reason => not_a_gateway}),
+	{next_state, StateName, StateData};
+handle_event(cast, Event, StateName,
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	%% Nothing sends one of these that this process knows of; ending
+	%% the association over it, as a function_clause used to, would
+	%% cost every message behind it.
+	?LOG_NOTICE("Unexpected event discarded",
+			#{layer => m3ua, ep => EP, assoc => Assoc, state => StateName,
+			event => Event, reason => no_clause}),
+	{next_state, StateName, StateData};
+handle_event({call, From}, Request, StateName,
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	?LOG_NOTICE("Unexpected request refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc, state => StateName,
+			request => Request, reason => no_clause}),
+	{next_state, StateName, StateData,
+			{reply, From, {error, unexpected_request}}};
 handle_event(info, {timeout, Timer, tack}, StateName,
 		#statedata{timer = Timer, req = Req} = StateData)
 		when Req /= undefined ->

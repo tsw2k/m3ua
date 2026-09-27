@@ -105,6 +105,7 @@ all() ->
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
 			sgp_transfer_rc, sgp_static_register, lifecycle_contained,
+			asp_sgp_one_node,
 			sgp_deregister_local, sgp_deregister_named, asp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
@@ -634,6 +635,40 @@ lifecycle_contained(_Config) ->
 	%% Raised in terminate: stopped all the same.
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+asp_sgp_one_node() ->
+	[{userdata, [{doc, "An ASP and its gateway on one node go active together, and a stray cast or call costs an association nothing."}]}].
+
+asp_sgp_one_node(_Config) ->
+	%% Both share the m3ua_as table here, so the gateway counts the ASP
+	%% among the members it tells of the application server's state.
+	RefS = make_ref(),
+	{ok, ServerEP} = m3ua:start(remote_cb(RefS), 0,
+			[{role, sgp}, {ip, {127,0,0,1}}]),
+	{_, server, sgp, {_, Port}} = m3ua:get_ep(ServerEP),
+	RefC = make_ref(),
+	{ok, ClientEP} = m3ua:start(remote_cb(RefC), 0,
+			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
+	Sgp = wait(RefS),
+	Asp = wait(RefC),
+	[Assoc] = assoc(ClientEP, 40),
+	ok = m3ua:asp_up(ClientEP, Assoc),
+	Keys = [{rand:uniform(16383), [], []}],
+	{ok, _RC} = m3ua:register(ClientEP, Assoc, undefined, undefined,
+			Keys, loadshare),
+	ok = m3ua:asp_active(ClientEP, Assoc),
+	ct:sleep(200),
+	true = is_process_alive(Asp),
+	active = m3ua:asp_status(ClientEP, Assoc),
+	%% Nothing either state machine was written for.
+	ok = gen_statem:cast(Asp, lifecycle_contained),
+	ok = gen_statem:cast(Sgp, lifecycle_contained),
+	{error, unexpected_request} = gen_statem:call(Asp, lifecycle_contained),
+	{error, unexpected_request} = gen_statem:call(Sgp, lifecycle_contained),
+	true = is_process_alive(Asp),
+	true = is_process_alive(Sgp),
+	ok = m3ua:stop(ClientEP),
+	ok = m3ua:stop(ServerEP).
 
 %% @hidden
 %% 	The stream the next DATA arrives on, passing over the NTFY an sgp

@@ -763,6 +763,22 @@ handle_event({call, From}, {getstat, Options}, StateName,
 handle_event({call, From}, getcount, StateName,
 		#statedata{count = Counters} = StateData) ->
 	{next_state, StateName, StateData, {reply, From, Counters}};
+handle_event(cast, Event, StateName,
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	%% Nothing sends one of these that this process knows of; ending
+	%% the association over it, as a function_clause used to, would
+	%% cost every message behind it.
+	?LOG_NOTICE("Unexpected event discarded",
+			#{layer => m3ua, ep => EP, assoc => Assoc, state => StateName,
+			event => Event, reason => no_clause}),
+	{next_state, StateName, StateData};
+handle_event({call, From}, Request, StateName,
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	?LOG_NOTICE("Unexpected request refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc, state => StateName,
+			request => Request, reason => no_clause}),
+	{next_state, StateName, StateData,
+			{reply, From, {error, unexpected_request}}};
 handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort,
 		{[#sctp_sndrcvinfo{assoc_id = Assoc, stream = Stream}], Data}},
 		StateName, #statedata{socket = Socket,
