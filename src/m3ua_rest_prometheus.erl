@@ -56,7 +56,9 @@ content_types_provided() ->
 %% requests.
 get_metrics([] = _Query, _Headers) ->
 	Body = [as_state(), asp_state(), sctp_state(), asp_count()],
-	{ok, [], Body}.
+	%% The exposition format's own type. Without it httpd answered
+	%% text/html, which a strict scraper refuses.
+	{ok, [{content_type, "text/plain; version=0.0.4"}], Body}.
 
 %%----------------------------------------------------------------------
 %%  internal functions
@@ -137,9 +139,10 @@ asp_state([{EP, Assoc} | T], Acc) ->
 			Role = atom_to_list(element(3, EndPoint)),
 			asp_state1(Name, Role, safely(fun() -> m3ua:asp_status(EP, Assoc) end), Acc);
 		{'EXIT', Reason} ->
+			%% This association's lines only; the others stand.
 			?LOG_WARNING("Failed to get endpoint",
 					#{layer => m3ua, reason => Reason}),
-			[]
+			Acc
 	end,
 	asp_state(T, NewAcc);
 asp_state([], Acc) ->
@@ -152,10 +155,10 @@ asp_state1(Name, Role, State, Acc) when is_atom(State) ->
 		NameS ->
 			asp_state2(NameS, Role, State, Acc)
 	end;
-asp_state1(_Name, _, {'EXIT', Reason}, _) ->
+asp_state1(_Name, _, {'EXIT', Reason}, Acc) ->
 	?LOG_WARNING("Failed to get ASP status",
 			#{layer => m3ua, reason => Reason}),
-	[].
+	Acc.
 %% @hidden
 asp_state2(Name, Role, down, Acc) ->
 	[["stc_m3ua_asp_state{endpoint=\"", Name,
@@ -177,7 +180,7 @@ asp_state2(Name, Role, active, Acc) ->
 	"stc_m3ua_asp_state{endpoint=\"", Name,
 			"\",role=\"", Role, "\",state=\"inactive\"} 0\n",
 	"stc_m3ua_asp_state{endpoint=\"", Name,
-			"\",state=\"active\"} 1\n"] | Acc].
+			"\",role=\"", Role, "\",state=\"active\"} 1\n"] | Acc].
 
 %% @hidden
 sctp_state() ->
@@ -204,9 +207,10 @@ sctp_state([{EP, Assoc} | T], Acc) ->
 			Role = atom_to_list(element(2, EndPoint)),
 			sctp_state1(Name, Role, m3ua:sctp_status(EP, Assoc), Acc);
 		{'EXIT', Reason} ->
+			%% This association's lines only; the others stand.
 			?LOG_WARNING("Failed to get endpoint",
 					#{layer => m3ua, reason => Reason}),
-			[]
+			Acc
 	end,
 	sctp_state(T, NewAcc);
 sctp_state([], Acc) ->
@@ -219,10 +223,10 @@ sctp_state1(Name, Role, {ok, #sctp_status{state = State}}, Acc) ->
 		NameS ->
 			sctp_state2(NameS, Role, State, Acc)
 	end;
-sctp_state1(_Name, _, {error, Reason}, _) ->
+sctp_state1(_Name, _, {error, Reason}, Acc) ->
 	?LOG_WARNING("Failed to get SCTP status",
 			#{layer => m3ua, reason => Reason}),
-	[].
+	Acc.
 %% @hidden
 sctp_state2(Name, Role, closed, Acc) ->
 	[["stc_m3ua_sctp_state{endpoint=\"", Name,
@@ -384,9 +388,10 @@ asp_count([{EP, Assoc} | T], Acc) ->
 			Role = atom_to_list(element(3, EndPoint)),
 			asp_count1(Name, Role, m3ua:getcount(EP, Assoc), Acc);
 		{'EXIT', Reason} ->
+			%% This association's lines only; the others stand.
 			?LOG_WARNING("Failed to get endpoint",
 					#{layer => m3ua, reason => Reason}),
-			[]
+			Acc
 	end,
 	asp_count(T, NewAcc);
 asp_count([], Acc) ->
@@ -399,10 +404,10 @@ asp_count1(Name, Role, {ok, Count}, Acc) ->
 		NameS ->
 			asp_count2(NameS, Role, Count, Acc)
 	end;
-asp_count1(_Name, _, {error, Reason}, _) ->
+asp_count1(_Name, _, {error, Reason}, Acc) ->
 	?LOG_WARNING("Failed to get ASP statistics",
 			#{layer => m3ua, reason => Reason}),
-	[].
+	Acc.
 %% @hidden
 asp_count2(Name, Role, Count, Acc) ->
 	[["stc_m3ua_message_total{endpoint=\"", Name,
