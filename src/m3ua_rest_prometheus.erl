@@ -80,6 +80,12 @@ as_state({error, Reason}) ->
 			#{layer => m3ua, reason => Reason}),
 	[].
 %% @hidden
+as_state([{undefined, RC, _, _, _, _, _, State} | T], Acc) ->
+	%% An application server a REG REQ made has no name, and every one
+	%% of them showed as name="undefined": two were one series. Its
+	%% routing context is what tells it apart.
+	NewAcc = as_state2(integer_to_list(RC), State, Acc),
+	as_state(T, NewAcc);
 as_state([{Name, _, _, _, _, _, _, State} | T], Acc) ->
 	NewAcc = as_state1(Name, State, Acc),
 	as_state(T, NewAcc);
