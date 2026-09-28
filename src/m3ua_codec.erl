@@ -531,7 +531,7 @@ fields(_, _) ->
 
 
 -type mtp3_user() :: sccp | tup | isup | broadband_isup
-						| satellite_isup | aal2signalling | gcp.
+						| satellite_isup | aal2signalling | bicc | gcp.
 
 -type mtp3_cause() :: unknown | unequipped_remote_user
 							| inaccessible_remote_user.
@@ -557,6 +557,11 @@ mtp3_user_cause({User, Cause}) ->
 	when
 		User :: integer() | mtp3_user().
 %% @doc MTP3-User Identity field
+%% 	RFC4666, Section-3.4.5, and the service indicators of Q.704 14.2.1:
+%% 	12 is AAL type 2 Signalling, 13 BICC, 14 the Gateway Control
+%% 	Protocol. 13 used to be taken for AAL type 2 and 12 for nothing, so
+%% 	a DUPU for AAL type 2 would not decode and one for BICC named the
+%% 	wrong user.
 %% @hidden
 %%
 mtp3_user(3) -> sccp;
@@ -564,14 +569,16 @@ mtp3_user(4) -> tup;
 mtp3_user(5) -> isup;
 mtp3_user(9) -> broadband_isup;
 mtp3_user(10) -> satellite_isup;
-mtp3_user(13) -> aal2signalling;
+mtp3_user(12) -> aal2signalling;
+mtp3_user(13) -> bicc;
 mtp3_user(14) -> gcp; %% Gateway Control Protocol
 mtp3_user(sccp) -> 3;
 mtp3_user(tup) -> 4;
 mtp3_user(isup) -> 5;
 mtp3_user(broadband_isup) -> 9;
 mtp3_user(satellite_isup) -> 10;
-mtp3_user(aal2signalling) -> 13;
+mtp3_user(aal2signalling) -> 12;
+mtp3_user(bicc) -> 13;
 mtp3_user(gcp) -> 14.
 
 -spec mtp3_cause(Cause) -> Cause
