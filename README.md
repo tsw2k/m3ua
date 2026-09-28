@@ -112,6 +112,12 @@ deregistration `dereg_out` and `dereg_rsp_in` at an ASP, `dereg_in` and
 `dereg_rsp_out` at a gateway. `transfer_discarded` counts transfers refused
 or dropped for the association's state.
 
+**A copy of every message.** `{copy, {Module, Function, Arg}}` given to
+`m3ua:start/3` has each association hand every M3UA message it receives or
+sends, whole and as on the wire, to `Module:Function(Arg, Copy)` in its own
+process -- for a probe feed or a capture. An exception there costs the copy
+alone (`copy_raised`). Without the option nothing is called.
+
 **State without asking.** `m3ua:asp_states()` answers every endpoint, by the
 name given with `{name, Name}`, and each association on it: connect or
 listen, the association's state and peer, the ASP state and since when, the

@@ -41,6 +41,7 @@
 		| {use_rc, boolean()}
 		| {ppi, boolean()}
 		| {cb_opts, term()}
+		| {copy, {Module :: module(), Function :: atom(), Arg :: term()}}
 		| gen_sctp:option().
 %% Options used to configure SCTP endpoint and M3UA process behaviour.
 %% <dl>
@@ -66,6 +67,17 @@
 %% 	<dt>cb_opts</dt>
 %% 		<dd>Additional information provided to the callback module in
 %% 		it's `init/1' callback function.</dd>
+%% 	<dt>copy</dt>
+%% 		<dd>`{Module, Function, Arg}': every M3UA message an association
+%% 		of this endpoint receives or sends, management and BEAT
+%% 		included, is handed to `Module:Function(Arg, Copy)' in the
+%% 		association's own process, where `Copy' is
+%% 		`#{name => Name, assoc => Assoc, dir => received | sent,
+%% 		message => Binary}', `Name' is the endpoint's `name' and
+%% 		`Binary' the whole message as on the wire: received before it is
+%% 		decoded, sent once the send succeeded. The function must not
+%% 		block. An exception in it costs that copy, is counted under
+%% 		`copy_raised' and said at error once. No option, no call.</dd>
 %% 	<dt>sctp_rtoinfo, sctp_initmsg, sctp_peer_addr_params</dt>
 %% 		<dd>As for {@link //kernel/gen_sctp. gen_sctp}. Each defaults to
 %% 		the Cisco ITP's SCTP timers: RTO initial, min and max 1000 ms,

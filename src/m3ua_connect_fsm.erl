@@ -54,6 +54,8 @@
 		%% Associations that came up and have ended since this
 		%% endpoint started, for m3ua_status.
 		ended = 0 :: non_neg_integer(),
+		%% m3ua:start/3's `{copy, MFA}', for the state machines.
+		copy :: undefined | {module(), atom(), term()},
 		callback :: {Module :: atom(), State :: term()}}).
 
 -define(RETRY_WAIT, 8000).
@@ -109,12 +111,13 @@ init([Sup, Callback, Opts] = _Args) ->
 		false ->
 			{true, Opts3}
 	end,
-	{CbOpts, Opts5} = case lists:keytake(cb_opts, 1, Opts4) of
+	{CbOpts, Opts4a} = case lists:keytake(cb_opts, 1, Opts4) of
 		{value, {cb_opts, R5}, O5} ->
 			{R5, O5};
 		false ->
 			{[], Opts4}
 	end,
+	{Copy, Opts5} = copy_option(Opts4a),
 	PpiOptions = [{sctp_events, #sctp_event_subscribe{adaptation_layer_event = true}},
 			{sctp_default_send_param, #sctp_sndrcvinfo{ppid = 3}},
 			{sctp_adaptation_layer, #sctp_setadaptation{adaptation_ind = 3}}],
@@ -135,6 +138,7 @@ init([Sup, Callback, Opts] = _Args) ->
 			StateData = #statedata{sup = Sup, role = Role,
 					name = Name, static = Static, use_rc = UseRC,
 					options = Options, cb_options = CbOpts, callback = Callback,
+					copy = Copy,
 					remote_addr = Raddr, remote_port = Rport,
 					remote_opts = Ropts},
 			ok = m3ua_status:endpoint(#{name => Name, mode => connect,
@@ -382,6 +386,21 @@ start_fsm(Sup, Args) ->
 	end.
 
 %% @hidden
+%% 	`{copy, {Module, Function, Arg}}': each state machine of this
+%% 	endpoint hands every M3UA message it receives and sends to
+%% 	Module:Function(Arg, Copy). See m3ua:start/3.
+copy_option(Options) ->
+	case lists:keytake(copy, 1, Options) of
+		{value, {copy, {Module, Function, _Arg} = Copy}, Rest}
+				when is_atom(Module), is_atom(Function) ->
+			{Copy, Rest};
+		{value, {copy, Other}, _Rest} ->
+			erlang:error({badarg, {copy, Other}});
+		false ->
+			{undefined, Options}
+	end.
+
+%% @hidden
 get_sup(#statedata{role = asp, sup = Sup} = StateData) ->
 	Children = supervisor:which_children(Sup),
 	{_, AspSup, _, _} = lists:keyfind(m3ua_asp_sup, 1, Children),
@@ -395,11 +414,12 @@ get_sup(#statedata{role = sgp, sup = Sup} = StateData) ->
 handle_connect(AssocChange, #statedata{socket = Socket,
 		receiver = Receiver, fsm_sup = Sup, remote_addr = Address,
 		remote_port = Port, name = Name, cb_options = CbOpts,
-		callback = Cb, static = Static,
+		callback = Cb, static = Static, copy = Copy,
 		use_rc = UseRC} = StateData) ->
 	ok = m3ua_receiver:stop(Receiver),
 	case start_fsm(Sup, [[Socket, Address, Port,
-			AssocChange, self(), Name, Cb, Static, UseRC, CbOpts], []]) of
+			AssocChange, self(), Name, Cb, Static, UseRC, CbOpts, Copy],
+			[]]) of
 		{ok, Fsm} ->
 			case m3ua_sctp:controlling_process(Socket, Fsm) of
 				ok ->

@@ -439,8 +439,9 @@ callback_mode() ->
 init([Socket, Address, Port,
 		#sctp_assoc_change{assoc_id = Assoc,
 		inbound_streams = InStreams, outbound_streams = OutStreams},
-		EP, EpName, Cb, Static, UseRC, CbOpts]) ->
+		EP, EpName, Cb, Static, UseRC, CbOpts, Copy]) ->
 	process_flag(trap_exit, true),
+	ok = copying(Copy, EpName, Assoc),
 	CbArgs = [?MODULE, self(), EP, EpName, Assoc, CbOpts],
 	case m3ua_callback:cb(init, Cb, CbArgs) of
 		{ok, Active, CbState} ->
@@ -595,7 +596,7 @@ active(cast, {'MTP-TRANSFER', request, Ref, From,
 		undefined ->
 			data_stream(SLS, NumStreams)
 	end,
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, Stream1, Ppid, Packet) of
+	case send(Socket, {PeerAddr, PeerPort}, Stream1, Ppid, Packet) of
 		ok ->
 			CbArgs = [From, Ref, Stream1,
 					RC, OPC, DPC, NI, SI, SLS, Data, CbState],
@@ -643,7 +644,7 @@ active({call, {From, Ref} = Caller},
 		undefined ->
 			data_stream(SLS, NumStreams)
 	end,
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, Stream1, Ppid, Packet) of
+	case send(Socket, {PeerAddr, PeerPort}, Stream1, Ppid, Packet) of
 		ok ->
 			CbArgs = [From, Ref, Stream1,
 					RC, OPC, DPC, NI, SI, SLS, Data, CbState],
@@ -716,7 +717,7 @@ handle_event(cast, {'M-NOTIFY', AsState, RC}, StateName,
 	Params = m3ua_codec:store_parameter(?Status, AsState, []),
 	Notify = #m3ua{class = ?MGMTMessage, type = ?MGMTNotify, params = Params},
 	Packet = m3ua_codec:m3ua(Notify),
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			ok = m3ua_receiver:replenish(Receiver, Active),
 			NotifyIn = maps:get(notify_out, Count, 0),
@@ -734,7 +735,7 @@ handle_event(cast, {'M-SSNM', Type, Params}, StateName,
 		assoc = Assoc, count = Count} = StateData) ->
 	Message = #m3ua{class = ?SSNMMessage, type = Type, params = Params},
 	Packet = m3ua_codec:m3ua(Message),
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			ok = m3ua_receiver:replenish(Receiver, Active),
 			Key = ssnm_count(Type),
@@ -762,7 +763,7 @@ handle_event({call, From}, {getstat, Options}, StateName,
 	{next_state, StateName, StateData, {reply, From, m3ua_sctp:getstat(Socket, Options)}};
 handle_event({call, From}, getcount, StateName,
 		#statedata{count = Counters} = StateData) ->
-	{next_state, StateName, StateData, {reply, From, Counters}};
+	{next_state, StateName, StateData, {reply, From, counters(Counters)}};
 handle_event(cast, Event, StateName,
 		#statedata{ep = EP, assoc = Assoc} = StateData) ->
 	%% Nothing sends one of these that this process knows of; ending
@@ -783,6 +784,7 @@ handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort,
 		{[#sctp_sndrcvinfo{assoc_id = Assoc, stream = Stream}], Data}},
 		StateName, #statedata{socket = Socket,
 		assoc = Assoc} = StateData) when is_binary(Data) ->
+	ok = copy(received, Data),
 	handle_sgp(Data, StateName, Stream, StateData);
 handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort,
 		{[], #sctp_assoc_change{state = comm_lost, assoc_id = Assoc}}}, _,
@@ -1157,7 +1159,7 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP, params = Params},
 	RCs = m3ua_codec:get_parameter(?RoutingContext, AspUp, undefined),
 	AspUpAck = #m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK},
 	Packet = m3ua_codec:m3ua(AspUpAck),
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			NewStateData = state_traffic_maint(RCs, asp_up, StateData),
 			CbArgs = [CbState],
@@ -1187,7 +1189,7 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP},
 			reason => already_inactive}),
 	AspUpAck = #m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK},
 	Packet = m3ua_codec:m3ua(AspUpAck),
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			ok = m3ua_receiver:replenish(Receiver, Active),
 			UpIn = maps:get(up_in, Count, 0),
@@ -1213,7 +1215,7 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP},
 			reason => unexpected_message}),
 	AspUpAck = #m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK},
 	Packet = m3ua_codec:m3ua(AspUpAck),
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			NewStateData = deregister(asp_up,
 					state_traffic_maint(undefined, asp_inactive, StateData)),
@@ -1253,7 +1255,7 @@ handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC, params = Params},
 	RCs = m3ua_codec:get_parameter(?RoutingContext, AspActive, undefined),
 	AspActiveAck = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPACACK},
 	Packet = m3ua_codec:m3ua(AspActiveAck),
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			NewStateData = state_traffic_maint(RCs, asp_active, StateData),
 			CbArgs = [CbState],
@@ -1281,7 +1283,7 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN, params = Params},
 	RCs = m3ua_codec:get_parameter(?RoutingContext, AspDown, undefined),
 	AspDownAck = #m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDNACK},
 	Packet = m3ua_codec:m3ua(AspDownAck),
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			NewStateData = deregister(asp_down,
 					state_traffic_maint(RCs, asp_down, StateData)),
@@ -1310,7 +1312,7 @@ handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIA, params = Params},
 	RCs = m3ua_codec:get_parameter(?RoutingContext, AspInActive, undefined),
 	AspInActiveAck = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIAACK},
 	Packet = m3ua_codec:m3ua(AspInActiveAck),
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			NewStateData = state_traffic_maint(RCs, asp_inactive, StateData),
 			CbArgs = [CbState],
@@ -1417,7 +1419,7 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMBEAT, params = Params},
 	BeatAck = #m3ua{class = ?ASPSMMessage,
 			type = ?ASPSMBEATACK, params = Params},
 	Packet = m3ua_codec:m3ua(BeatAck),
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			ok = m3ua_receiver:replenish(Receiver, Active),
 			UpIn = maps:get(beat_in, Count, 0),
@@ -1481,7 +1483,7 @@ send_error(ErrorCode, StateName,
 	ErrorMsg = #m3ua{class = ?MGMTMessage,
 			type = ?MGMTError, params = ErrorParams},
 	Packet = m3ua_codec:m3ua(ErrorMsg),
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			ok = m3ua_receiver:replenish(Receiver, Active),
 			ErrorOut = maps:get(error_out, Count, 0),
@@ -1561,7 +1563,7 @@ reg_request([H | T], StateName, #statedata{socket = Socket, peer_addr = PeerAddr
 			ErrorParams = m3ua_codec:parameters(P0),
 			ErrorMsg = #m3ua{class = ?MGMTMessage, type = ?MGMTError, params = ErrorParams},
 			Packet = m3ua_codec:m3ua(ErrorMsg),
-			case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+			case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 				ok ->
 					ErrorOut = maps:get(error_out, Count, 0),
 					NewCount = maps:put(error_out, ErrorOut + 1, Count),
@@ -1579,7 +1581,7 @@ reg_request([], StateName, #statedata{socket = Socket, peer_addr = PeerAddr, pee
 		ep = EP, assoc = Assoc} = StateData, RegResults, Notifies) ->
 	RegResMsg = #m3ua{class = ?RKMMessage, type = ?RKMREGRSP, params = lists:reverse(RegResults)},
 	RegResPacket = m3ua_codec:m3ua(RegResMsg),
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, RegResPacket) of
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, RegResPacket) of
 		ok ->
 			send_notify(Notifies, StateName, StateData);
 		{error, eagain} ->
@@ -1669,7 +1671,7 @@ send_notify([{Status, RC} | T] = _Notifies, StateName,
 	P1 = m3ua_codec:add_parameter(?RoutingContext, [RC], P0),
 	Message = #m3ua{class = ?MGMTMessage, type = ?MGMTNotify, params = P1},
 	Packet = m3ua_codec:m3ua(Message),
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			CbArgs = [RC, Status, undefined, CbState],
 			{{ok, NewCbState}, Count1} = contain(notify, CbMod, CbArgs,
@@ -1707,6 +1709,71 @@ publish(StateData) ->
 published(#statedata{rks = RKs, count = Count}, Now) ->
 	#{contexts => maps:from_list([{RC, AsState} || {RC, _, AsState} <- RKs]),
 			counters => Count, updated => Now}.
+
+%% @hidden
+%% 	m3ua:start/3's `{copy, {Module, Function, Arg}}', kept where the
+%% 	send and receive paths reach it without the state data, which not
+%% 	every one of them has to hand. Nothing is kept without the option,
+%% 	and then copy/2 costs a dictionary read.
+copying(undefined, _EpName, _Assoc) ->
+	ok;
+copying({Module, Function, Arg}, EpName, Assoc) ->
+	_ = put('$m3ua_copy', {Module, Function, Arg, EpName, Assoc}),
+	ok.
+
+%% @hidden
+%% 	Hand one whole M3UA message, as on the wire, to the copy function
+%% 	in this process. It is the caller's and is not to block; an
+%% 	exception in it costs that copy, is counted under copy_raised, and
+%% 	is said at error the first time, since a copy that fails once will
+%% 	most likely fail for every message.
+copy(Direction, Packet) ->
+	case get('$m3ua_copy') of
+		undefined ->
+			ok;
+		{Module, Function, Arg, EpName, Assoc} ->
+			Copy = #{name => EpName, assoc => Assoc, dir => Direction,
+					message => iolist_to_binary(Packet)},
+			try Module:Function(Arg, Copy) of
+				_ ->
+					ok
+			catch
+				Class:Reason:Stacktrace ->
+					case get('$m3ua_copy_raised') of
+						undefined ->
+							?LOG_ERROR("Copy raised",
+									#{layer => m3ua, name => EpName,
+									assoc => Assoc, function => {Module, Function},
+									class => Class, reason => Reason,
+									stacktrace => Stacktrace}),
+							_ = put('$m3ua_copy_raised', 1);
+						N ->
+							_ = put('$m3ua_copy_raised', N + 1)
+					end,
+					ok
+			end
+	end.
+
+%% @hidden
+%% 	Every M3UA message this process sends goes through here, so that
+%% 	each one sent is copied.
+send(Socket, Peer, Stream, Ppid, Packet) ->
+	case m3ua_sctp:send(Socket, Peer, Stream, Ppid, Packet) of
+		ok ->
+			copy(sent, Packet);
+		Other ->
+			Other
+	end.
+
+%% @hidden
+%% 	The counters, with the copies that raised.
+counters(Counters) ->
+	case get('$m3ua_copy_raised') of
+		undefined ->
+			Counters;
+		N ->
+			Counters#{copy_raised => N}
+	end.
 
 -spec data_stream(SLS, NumStreams) -> Stream
 	when
@@ -1967,7 +2034,7 @@ dereg_request(RCs, StateName,
 	DeregRsp = #m3ua{class = ?RKMMessage, type = ?RKMDEREGRSP,
 			params = DeregResults},
 	Packet = m3ua_codec:m3ua(DeregRsp),
-	case m3ua_sctp:send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->
 			ok = m3ua_receiver:replenish(Receiver, Active),
 			Count1 = NewStateData#statedata.count,

@@ -105,7 +105,7 @@ all() ->
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
 			sgp_transfer_rc, sgp_static_register, lifecycle_contained,
-			asp_sgp_one_node,
+			asp_sgp_one_node, copy_messages,
 			sgp_deregister_local, sgp_deregister_named, asp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
@@ -669,6 +669,61 @@ asp_sgp_one_node(_Config) ->
 	true = is_process_alive(Sgp),
 	ok = m3ua:stop(ClientEP),
 	ok = m3ua:stop(ServerEP).
+
+copy_messages() ->
+	[{userdata, [{doc, "With {copy, MFA} every M3UA message received or sent is handed to the function whole, and one that raises costs the copy, not the association."}]}].
+
+copy_messages(_Config) ->
+	Name = make_ref(),
+	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+			[{name, Name}, {role, sgp}, {ip, {127,0,0,1}},
+			{copy, {?MODULE, copied, self()}}]),
+	{_, server, sgp, {_, Port}} = m3ua:get_ep(EP),
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	{ok, #sctp_assoc_change{state = comm_up, assoc_id = PeerAssoc}} =
+			gen_sctp:connect(Peer, {127,0,0,1}, Port, []),
+	[Assoc] = assoc(EP, 40),
+	AspUp = raw_msg(?ASPSMMessage, ?ASPSMASPUP),
+	ok = raw_put(Peer, PeerAssoc, AspUp),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	%% What arrived, as it arrived, and what went out.
+	#{name := Name, assoc := Assoc, message := AspUp} = copied(received),
+	#{name := Name, assoc := Assoc, message := AspUpAck} = copied(sent),
+	#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUPACK} =
+			m3ua_codec:m3ua(AspUpAck),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer),
+	%% A copy function that raises: acknowledged all the same.
+	{ok, EP2} = m3ua:start(callback(make_ref()), 0,
+			[{role, sgp}, {ip, {127,0,0,1}},
+			{copy, {?MODULE, copied, raise}}]),
+	{_, server, sgp, {_, Port2}} = m3ua:get_ep(EP2),
+	{ok, Peer2} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	{ok, #sctp_assoc_change{state = comm_up, assoc_id = PeerAssoc2}} =
+			gen_sctp:connect(Peer2, {127,0,0,1}, Port2, []),
+	[Assoc2] = assoc(EP2, 40),
+	ok = raw_put(Peer2, PeerAssoc2, AspUp),
+	#m3ua{} = raw_expect(Peer2, ?ASPSMMessage, ?ASPSMASPUPACK),
+	inactive = m3ua:asp_status(EP2, Assoc2),
+	{ok, #{copy_raised := 2}} = m3ua:getcount(EP2, Assoc2),
+	ok = m3ua:stop(EP2),
+	ok = gen_sctp:close(Peer2).
+
+%% @hidden
+%% 	The copy function copy_messages gives, and the case's wait for it.
+copied(raise, _Copy) ->
+	erlang:error(copy_messages);
+copied(Pid, Copy) ->
+	Pid ! {copied, Copy}.
+%% @hidden
+copied(Direction) ->
+	receive
+		{copied, #{dir := Direction} = Copy} ->
+			Copy
+	after
+		4000 ->
+			timeout
+	end.
 
 %% @hidden
 %% 	The stream the next DATA arrives on, passing over the NTFY an sgp

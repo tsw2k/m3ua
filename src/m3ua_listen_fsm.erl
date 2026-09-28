@@ -51,6 +51,8 @@
 		%% Associations that were taken on and have ended since this
 		%% endpoint started, for m3ua_status.
 		ended = 0 :: non_neg_integer(),
+		%% m3ua:start/3's `{copy, MFA}', for the state machines.
+		copy :: undefined | {module(), atom(), term()},
 		callback :: {Module :: atom(), State :: term()}}).
 
 %%----------------------------------------------------------------------
@@ -103,12 +105,13 @@ init([Sup, Callback, Opts] = _Args) ->
 		false ->
 			{true, Opts3}
 	end,
-	{CbOpts, Opts5} = case lists:keytake(cb_opts, 1, Opts4) of
+	{CbOpts, Opts4a} = case lists:keytake(cb_opts, 1, Opts4) of
 		{value, {cb_opts, R5}, O5} ->
 			{R5, O5};
 		false ->
 			{[], Opts4}
 	end,
+	{Copy, Opts5} = copy_option(Opts4a),
 	PpiOptions = [{sctp_events, #sctp_event_subscribe{adaptation_layer_event = true}},
 			{sctp_default_send_param, #sctp_sndrcvinfo{ppid = 3}},
 			{sctp_adaptation_layer, #sctp_setadaptation{adaptation_ind = 3}}],
@@ -127,7 +130,8 @@ init([Sup, Callback, Opts] = _Args) ->
 			{ok, Socket} ->
 				StateData = #statedata{socket = Socket, sup = Sup, role = Role,
 						name = Name, static = Static, use_rc = UseRC,
-						options = Options, cb_options = CbOpts, callback = Callback},
+						options = Options, cb_options = CbOpts, callback = Callback,
+						copy = Copy},
 				case m3ua_sctp:listen(Socket) of
 					ok ->
 						case m3ua_sctp:sockname(Socket) of
@@ -313,6 +317,21 @@ start_fsm(Sup, Args) ->
 	end.
 
 %% @hidden
+%% 	`{copy, {Module, Function, Arg}}': each state machine of this
+%% 	endpoint hands every M3UA message it receives and sends to
+%% 	Module:Function(Arg, Copy). See m3ua:start/3.
+copy_option(Options) ->
+	case lists:keytake(copy, 1, Options) of
+		{value, {copy, {Module, Function, _Arg} = Copy}, Rest}
+				when is_atom(Module), is_atom(Function) ->
+			{Copy, Rest};
+		{value, {copy, Other}, _Rest} ->
+			erlang:error({badarg, {copy, Other}});
+		false ->
+			{undefined, Options}
+	end.
+
+%% @hidden
 get_sup(#statedata{role = asp, sup = Sup} = StateData) ->
 	Children = supervisor:which_children(Sup),
 	{_, AspSup, _, _} = lists:keyfind(m3ua_asp_sup, 1, Children),
@@ -326,13 +345,13 @@ get_sup(#statedata{role = sgp, sup = Sup} = StateData) ->
 accept(Socket, Address, Port,
 		#sctp_assoc_change{assoc_id = Assoc} = AssocChange,
 		Sup, #statedata{fsms = Fsms, name = Name, receiver = Receiver,
-		callback = Cb, cb_options = CbOpts,
+		callback = Cb, cb_options = CbOpts, copy = Copy,
 		static = Static, use_rc = UseRC} = StateData) ->
 	case m3ua_sctp:peeloff(Socket, Assoc) of
 		{ok, NewSocket} ->
 			case start_fsm(Sup,
 					[[NewSocket, Address, Port, AssocChange, self(),
-					Name, Cb, Static, UseRC, CbOpts], []]) of
+					Name, Cb, Static, UseRC, CbOpts, Copy], []]) of
 				{ok, Fsm} ->
 					case m3ua_sctp:controlling_process(NewSocket, Fsm) of
 						ok ->
