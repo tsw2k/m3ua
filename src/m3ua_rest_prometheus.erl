@@ -55,7 +55,9 @@ content_types_provided() ->
 %% requests.
 get_metrics([] = _Query, _Headers) ->
 	Body = [as_state(), asp_state(), sctp_state(), asp_count()],
-	{ok, [], Body}.
+	%% The exposition format's own type. Without it httpd answers
+	%% text/html, which a strict scraper refuses.
+	{ok, [{content_type, "text/plain; version=0.0.4"}], Body}.
 
 %%----------------------------------------------------------------------
 %%  internal functions
@@ -77,6 +79,12 @@ as_state({error, Reason}) ->
 			{module, ?MODULE}, {error, Reason}]),
 	[].
 %% @hidden
+as_state([{undefined, RC, _, _, _, _, _, State} | T], Acc) ->
+	%% An application server a REG REQ made has no name; its routing
+	%% context tells it apart, where "undefined" would make every such
+	%% server one series.
+	NewAcc = as_state2(integer_to_list(RC), State, Acc),
+	as_state(T, NewAcc);
 as_state([{Name, _, _, _, _, _, _, State} | T], Acc) ->
 	NewAcc = as_state1(Name, State, Acc),
 	as_state(T, NewAcc);
@@ -138,7 +146,8 @@ asp_state([{EP, Assoc} | T], Acc) ->
 		{'EXIT', Reason} ->
 			error_logger:error_report(["Failed to get endpoint",
 					{module, ?MODULE}, {error, Reason}]),
-			[]
+			%% This association's lines only; the others stand.
+			Acc
 	end,
 	asp_state(T, NewAcc);
 asp_state([], Acc) ->
@@ -151,10 +160,10 @@ asp_state1(Name, Role, State, Acc) when is_atom(State) ->
 		NameS ->
 			asp_state2(NameS, Role, State, Acc)
 	end;
-asp_state1(_Name, _, {'EXIT', Reason}, _) ->
+asp_state1(_Name, _, {'EXIT', Reason}, Acc) ->
 	error_logger:error_report(["Failed to get ASP status",
 			{module, ?MODULE}, {error, Reason}]),
-	[].
+	Acc.
 %% @hidden
 asp_state2(Name, Role, down, Acc) ->
 	[["stc_m3ua_asp_state{endpoint=\"", Name,
@@ -176,7 +185,7 @@ asp_state2(Name, Role, active, Acc) ->
 	"stc_m3ua_asp_state{endpoint=\"", Name,
 			"\",role=\"", Role, "\",state=\"inactive\"} 0\n",
 	"stc_m3ua_asp_state{endpoint=\"", Name,
-			"\",state=\"active\"} 1\n"] | Acc].
+			"\",role=\"", Role, "\",state=\"active\"} 1\n"] | Acc].
 
 %% @hidden
 sctp_state() ->
@@ -205,7 +214,8 @@ sctp_state([{EP, Assoc} | T], Acc) ->
 		{'EXIT', Reason} ->
 			error_logger:error_report(["Failed to get endpoint",
 					{module, ?MODULE}, {error, Reason}]),
-			[]
+			%% This association's lines only; the others stand.
+			Acc
 	end,
 	sctp_state(T, NewAcc);
 sctp_state([], Acc) ->
@@ -218,10 +228,10 @@ sctp_state1(Name, Role, {ok, #sctp_status{state = State}}, Acc) ->
 		NameS ->
 			sctp_state2(NameS, Role, State, Acc)
 	end;
-sctp_state1(_Name, _, {error, Reason}, _) ->
+sctp_state1(_Name, _, {error, Reason}, Acc) ->
 	error_logger:error_report(["Failed to get SCTP status",
 			{module, ?MODULE}, {error, Reason}]),
-	[].
+	Acc.
 %% @hidden
 sctp_state2(Name, Role, closed, Acc) ->
 	[["stc_m3ua_sctp_state{endpoint=\"", Name,
@@ -385,7 +395,8 @@ asp_count([{EP, Assoc} | T], Acc) ->
 		{'EXIT', Reason} ->
 			error_logger:error_report(["Failed to get endpoint",
 					{module, ?MODULE}, {error, Reason}]),
-			[]
+			%% This association's lines only; the others stand.
+			Acc
 	end,
 	asp_count(T, NewAcc);
 asp_count([], Acc) ->
@@ -398,10 +409,10 @@ asp_count1(Name, Role, {ok, Count}, Acc) ->
 		NameS ->
 			asp_count2(NameS, Role, Count, Acc)
 	end;
-asp_count1(_Name, _, {error, Reason}, _) ->
+asp_count1(_Name, _, {error, Reason}, Acc) ->
 	error_logger:error_report(["Failed to get ASP statistics",
 			{module, ?MODULE}, {error, Reason}]),
-	[].
+	Acc.
 %% @hidden
 asp_count2(Name, Role, Count, Acc) ->
 	[["stc_m3ua_message_total{endpoint=\"", Name,
