@@ -56,8 +56,11 @@ association:
 
 - SSNM can be sent: DUNA, DAVA, DUPU, DRST and SCON by a signalling gateway,
   DAUD by an ASP;
-- an ASP takes a DRST as MTP-RESUME, like a DAVA (§5.4), and a DUPU through the
-  optional callback `unavailable_user/6` (§5.5.2.3.4);
+- an ASP takes a DRST as MTP-RESUME, like a DAVA (§5.4) -- through the
+  optional callback `restricted/4` where the callback has it, so that an MTP3
+  above can tell restricted from available, `resume/4` otherwise; an SCON through
+  the optional `congestion/5` with its level, `status/4` otherwise; and a DUPU
+  through the optional callback `unavailable_user/6` (§5.5.2.3.4);
 - an ASP UP at an active ASP is acknowledged, answered with ERR and leaves the
   ASP inactive; at an inactive one it is acknowledged and nothing more; an ASP
   UP ACK the ASP did not ask for leaves it inactive, and from active or down it

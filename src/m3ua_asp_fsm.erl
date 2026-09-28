@@ -455,7 +455,27 @@
 		Result :: {ok, NewState} | {error, Reason},
 		NewState :: term(),
 		Reason :: term().
--optional_callbacks([unavailable_user/6, deregister/5]).
+-callback restricted(Stream, RCs, APCs, State) -> Result
+	when
+		Stream :: pos_integer(),
+		RCs :: [0..4294967295],
+		APCs :: [0..16777215],
+		State :: term(),
+		Result :: {ok, NewState} | {error, Reason},
+		NewState :: term(),
+		Reason :: term().
+-callback congestion(Stream, RCs, APCs, Level, State) -> Result
+	when
+		Stream :: pos_integer(),
+		RCs :: [0..4294967295],
+		APCs :: [0..16777215],
+		Level :: 0..3 | undefined,
+		State :: term(),
+		Result :: {ok, NewState} | {error, Reason},
+		NewState :: term(),
+		Reason :: term().
+-optional_callbacks([unavailable_user/6, deregister/5, restricted/4,
+		congestion/5]).
 
 %%----------------------------------------------------------------------
 %%  The m3ua_asp_fsm gen_statem callbacks
@@ -1676,7 +1696,8 @@ handle_asp(#m3ua{class = ?SSNMMessage, type = ?SSNMDRST, params = Params},
 	APCs = lists:append(m3ua_codec:get_all_parameter(?AffectedPointCode,
 			Parameters)),
 	CbArgs = [Stream, RCs, APCs, CbState],
-	{{ok, NewCbState}, Count1} = contain(resume, CbMod, CbArgs,
+	%% restricted/4, or resume/4 where the callback does not take it.
+	{{ok, NewCbState}, Count1} = contain(restricted, CbMod, CbArgs,
 			{ok, CbState}, Count, StateData#statedata.ep,
 			StateData#statedata.assoc),
 	ok = m3ua_receiver:replenish(Receiver, Active),
@@ -1729,8 +1750,12 @@ handle_asp(#m3ua{class = ?SSNMMessage, type = ?SSNMSCON, params = Params},
 	RCs = m3ua_codec:get_parameter(?RoutingContext, Parameters, []),
 	APCs = lists:append(m3ua_codec:get_all_parameter(?AffectedPointCode,
 			Parameters)),
-	CbArgs = [Stream, RCs, APCs, CbState],
-	{{ok, NewCbState}, Count1} = contain(status, CbMod, CbArgs,
+	Level = m3ua_codec:get_parameter(?CongestionIndications, Parameters,
+			undefined),
+	%% congestion/5, or status/4 without the level where the callback
+	%% does not take it.
+	CbArgs = [Stream, RCs, APCs, Level, CbState],
+	{{ok, NewCbState}, Count1} = contain(congestion, CbMod, CbArgs,
 			{ok, CbState}, StateData#statedata.count,
 			StateData#statedata.ep, StateData#statedata.assoc),
 	NewStateData = StateData#statedata{cb_state = NewCbState,

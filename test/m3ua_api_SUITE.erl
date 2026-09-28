@@ -100,7 +100,7 @@ all() ->
 			reconnect_in_place,
 			listen_not_accepted, connect_not_taken, asp_states,
 			endpoint_gives_up, lm_restart, callback_raised, asp_up_ack_unexpected,
-			asp_drst_dupu,
+			asp_drst_dupu, asp_restricted_congestion,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
@@ -1341,6 +1341,50 @@ asp_drst_dupu(_Config) ->
 	{ok, #{drst_in := 1, dupu_in := 1}} = m3ua:getcount(EP, Assoc),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+asp_restricted_congestion() ->
+	[{userdata, [{doc, "DRST reaches restricted/4 and SCON congestion/5 with its level where the callback takes them, resume/4 and status/4 where it does not."}]}].
+
+asp_restricted_congestion(_Config) ->
+	Self = self(),
+	Frestricted = fun(_Stream, _RCs, APCs, State, _Pid) ->
+				Self ! {restricted, APCs},
+				{ok, State}
+	end,
+	Fcongestion = fun(_Stream, _RCs, APCs, Level, State, _Pid) ->
+				Self ! {congestion, APCs, Level},
+				{ok, State}
+	end,
+	Fstatus = fun(_Stream, _RCs, APCs, State, _Pid) ->
+				Self ! {status, APCs},
+				{ok, State}
+	end,
+	Callback = (callback(make_ref()))#m3ua_fsm_cb{restricted = Frestricted,
+			congestion = Fcongestion, status = Fstatus},
+	{Peer, PeerAssoc, EP, _Assoc} = raw_sg(Callback),
+	APC = rand:uniform(16#ffffff) - 1,
+	Drst = #m3ua{class = ?SSNMMessage, type = ?SSNMDRST,
+			params = [{?AffectedPointCode, [APC]}]},
+	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(Drst)),
+	{restricted, [APC]} = receive {restricted, _} = R -> R after 4000 -> timeout end,
+	Scon = #m3ua{class = ?SSNMMessage, type = ?SSNMSCON,
+			params = [{?AffectedPointCode, [APC]}, {?CongestionIndications, 2}]},
+	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(Scon)),
+	{congestion, [APC], 2} = receive {congestion, _, _} = C1 -> C1 after 4000 -> timeout end,
+	Scon0 = #m3ua{class = ?SSNMMessage, type = ?SSNMSCON,
+			params = [{?AffectedPointCode, [APC]}]},
+	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(Scon0)),
+	{congestion, [APC], undefined} = receive {congestion, _, _} = C2 -> C2 after 4000 -> timeout end,
+	nothing_sent = raw_get(Peer),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer),
+	%% Without congestion/5 an SCON goes to status/4, as it did.
+	Callback2 = (callback(make_ref()))#m3ua_fsm_cb{status = Fstatus},
+	{Peer2, PeerAssoc2, EP2, _Assoc2} = raw_sg(Callback2),
+	ok = raw_put(Peer2, PeerAssoc2, m3ua_codec:m3ua(Scon)),
+	{status, [APC]} = receive {status, _} = S -> S after 4000 -> timeout end,
+	ok = m3ua:stop(EP2),
+	ok = gen_sctp:close(Peer2).
 
 listen_not_accepted() ->
 	[{userdata, [{doc, "An association a listening endpoint cannot take on costs that association, not the endpoint."}]}].

@@ -22,7 +22,7 @@
 
 %% export the m3ua_callback public API
 -export([init/6, recv/9, send/11, pause/4, resume/4, status/4,
-		audit/4, unavailable_user/6, register/5, deregister/5, asp_up/1, asp_down/1, asp_active/1,
+		audit/4, unavailable_user/6, restricted/4, congestion/5, register/5, deregister/5, asp_up/1, asp_down/1, asp_active/1,
 		asp_inactive/1, notify/4, info/2, terminate/2]).
 
 %% export the m3ua_callback private API
@@ -144,6 +144,44 @@ status(_Stream, _RK, _DPCs, State) ->
 %% 	MTP3-User: `User' at the affected point code cannot be reached, for
 %% 	`Cause'. The default takes no action.
 unavailable_user(_Stream, _RCs, _APCs, _User, _Cause, State) ->
+	{ok, State}.
+
+-spec restricted(Stream, RCs, APCs, State) -> Result
+	when
+		Stream :: pos_integer(),
+		RCs :: [0..4294967295],
+		APCs :: [0..16777215],
+		State :: term(),
+		Result :: {ok, NewState} | {error, Reason},
+		NewState :: term(),
+		Reason :: term().
+%% @doc A Destination Restricted (DRST) was received.
+%%
+%% 	RFC 4666 5.5.2.3.3 maps it, as DAVA, to an MTP-RESUME indication,
+%% 	and resume/4 is called for a callback that does not take this one;
+%% 	an MTP3 above that tells a restricted destination from an available
+%% 	one (TFR from TFA) takes it here instead. The default takes no
+%% 	action, as resume/4's does.
+restricted(_Stream, _RCs, _APCs, State) ->
+	{ok, State}.
+
+-spec congestion(Stream, RCs, APCs, Level, State) -> Result
+	when
+		Stream :: pos_integer(),
+		RCs :: [0..4294967295],
+		APCs :: [0..16777215],
+		Level :: 0..3 | undefined,
+		State :: term(),
+		Result :: {ok, NewState} | {error, Reason},
+		NewState :: term(),
+		Reason :: term().
+%% @doc A Signalling Congestion (SCON) was received, with the level its
+%% 	Congestion Indications parameter gives, `undefined' without one.
+%%
+%% 	RFC 4666 5.5.2.3.5 maps it to an MTP-STATUS indication, and status/4
+%% 	is called, without the level, for a callback that does not take
+%% 	this one. The default takes no action, as status/4's does.
+congestion(_Stream, _RCs, _APCs, _Level, State) ->
 	{ok, State}.
 
 -spec audit(Stream, RCs, APCs, State) -> Result
@@ -314,8 +352,34 @@ takes(#m3ua_fsm_cb{}, _Name) ->
 		Args :: [term()],
 		Result :: term().
 %% @private
+cb(restricted, Cb, Args) when is_atom(Cb) ->
+	%% Optional: a module written before it existed has resume/4.
+	case exported(Cb, restricted, 4) of
+		true ->
+			apply(Cb, restricted, Args);
+		false ->
+			apply(Cb, resume, Args)
+	end;
+cb(congestion, Cb, [Stream, RCs, APCs, _Level, State] = Args)
+		when is_atom(Cb) ->
+	%% Optional: a module written before it existed has status/4.
+	case exported(Cb, congestion, 5) of
+		true ->
+			apply(Cb, congestion, Args);
+		false ->
+			apply(Cb, status, [Stream, RCs, APCs, State])
+	end;
 cb(Handler, Cb, Args) when is_atom(Cb) ->
 	apply(Cb, Handler, Args);
+cb(restricted, #m3ua_fsm_cb{restricted = false} = Cb, Args) ->
+	cb(resume, Cb, Args);
+cb(restricted, #m3ua_fsm_cb{restricted = F, extra = E}, Args) ->
+	apply(F, Args ++ E);
+cb(congestion, #m3ua_fsm_cb{congestion = false} = Cb,
+		[Stream, RCs, APCs, _Level, State]) ->
+	cb(status, Cb, [Stream, RCs, APCs, State]);
+cb(congestion, #m3ua_fsm_cb{congestion = F, extra = E}, Args) ->
+	apply(F, Args ++ E);
 cb(init, #m3ua_fsm_cb{init = false}, Args) ->
 	apply(?MODULE, init, Args);
 cb(init, #m3ua_fsm_cb{init = F, extra = E}, Args) ->
@@ -385,3 +449,7 @@ cb(terminate, #m3ua_fsm_cb{terminate = false}, Args) ->
 cb(terminate, #m3ua_fsm_cb{terminate = F, extra = E}, Args) ->
 	apply(F, Args ++ E).
 
+%% @hidden
+exported(Module, Function, Arity) ->
+	_ = code:ensure_loaded(Module),
+	erlang:function_exported(Module, Function, Arity).
