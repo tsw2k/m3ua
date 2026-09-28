@@ -551,6 +551,20 @@ down(timeout, _EventContent, #statedata{ep = EP, assoc = Assoc, receiver = undef
 			count = CbCount, receiver = Receiver, lm = whereis(m3ua)}};
 down(cast, {'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
 	handle_dereg(Event, down, StateData);
+%% A static registration asks nothing of the peer and may be made down.
+%% Any other is a REG REQ, which the peer takes only once the asp is up
+%% (RFC4666, Section-4.4.1): refused now rather than left for layer
+%% management's call to time out, as it was, with nothing said.
+down(cast, {'M-RK_REG', request, _, _, _, _, _, _, _} = Event,
+		#statedata{static = true} = StateData) ->
+	handle_reg(Event, down, StateData);
+down(cast, {'M-RK_REG', request, Ref, From, RC, _, _, _, _},
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	?LOG_NOTICE("Routing key registration refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc, rc => RC,
+			reason => asp_down}),
+	gen_server:cast(From, {'M-RK_REG', confirm, Ref, {error, asp_down}}),
+	{next_state, down, StateData};
 down(cast, {'M-ASP_UP', request, Ref, From},
 		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->

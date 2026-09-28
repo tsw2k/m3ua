@@ -105,7 +105,7 @@ all() ->
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
 			sgp_transfer_rc, sgp_static_register, lifecycle_contained,
-			asp_sgp_one_node, copy_messages,
+			asp_sgp_one_node, copy_messages, asp_register_down,
 			sgp_deregister_local, sgp_deregister_named, asp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
@@ -724,6 +724,20 @@ copied(Direction) ->
 		4000 ->
 			timeout
 	end.
+
+asp_register_down() ->
+	[{userdata, [{doc, "A registration asked of an ASP that is down is refused at once, and sends nothing."}]}].
+
+asp_register_down(_Config) ->
+	{Peer, _PeerAssoc, EP, Assoc} = raw_sg(),
+	down = m3ua:asp_status(EP, Assoc),
+	Keys = [{rand:uniform(16383), [], []}],
+	{Micro, {error, asp_down}} = timer:tc(m3ua, register,
+			[EP, Assoc, undefined, undefined, Keys, loadshare]),
+	true = Micro < 1000000,
+	nothing_sent = raw_get(Peer),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
 
 %% @hidden
 %% 	The stream the next DATA arrives on, passing over the NTFY an sgp
