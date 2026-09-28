@@ -179,7 +179,7 @@ duna(_Config) ->
 			m3ua_codec:parameters(Decoded)).
 
 dupu() ->
-	[{userdata, [{doc, "DUPU message encoding"}]}].
+	[{userdata, [{doc, "DUPU message encoding, and the MTP3-User identities of RFC 4666 3.4.5"}]}].
 
 dupu(_Config) ->
 	Params = m3ua_codec:parameters([{?UserCause,
@@ -191,7 +191,18 @@ dupu(_Config) ->
 	#m3ua{class = ?SSNMMessage, type = ?SSNMDUPU,
 			params = Decoded} = m3ua_codec:m3ua(Bin),
 	{sccp, inaccessible_remote_user} = m3ua_codec:get_parameter(?UserCause,
-			m3ua_codec:parameters(Decoded), undefined).
+			m3ua_codec:parameters(Decoded), undefined),
+	%% RFC 4666 3.4.5: 12 AAL type 2 Signalling, 13 BICC, 14 GCP.
+	F = fun(User, Value) ->
+			<<16#0204:16, 8:16, 0:16, Value:16>> = m3ua_codec:parameters(
+					[{?UserCause, {User, unknown}}]),
+			{User, unknown} = m3ua_codec:get_parameter(?UserCause,
+					m3ua_codec:parameters(<<16#0204:16, 8:16, 0:16, Value:16>>),
+					undefined)
+	end,
+	{aal2signalling, unknown} = F(aal2signalling, 12),
+	{bicc, unknown} = F(bicc, 13),
+	{gcp, unknown} = F(gcp, 14).
 
 scon() ->
 	[{userdata, [{doc, "SCON message encoding"}]}].
