@@ -282,9 +282,9 @@ undecodable1({Peer, PeerAssoc, EP, Assoc}) ->
 	%% Heartbeat Data claiming eight octets of value with four present.
 	parameter_field_error = Send(<<1, 0, ?ASPSMMessage, ?ASPSMBEAT,
 			16:32, ?HeartbeatData:16, 12:16, 0:32>>),
-	%% An Affected Point Code with a mask other than zero.
+	%% An Affected Point Code of six octets, a point code and a half.
 	invalid_parameter_value = Send(<<1, 0, ?SSNMMessage, ?SSNMDUNA,
-			16:32, ?AffectedPointCode:16, 8:16, 1, 0:24>>),
+			20:32, ?AffectedPointCode:16, 10:16, 0, 0:24, 0:16, 0:16>>),
 	%% A Status nobody defined.
 	invalid_parameter_value = Send(<<1, 0, ?MGMTMessage, ?MGMTNotify,
 			16:32, ?Status:16, 8:16, 9:16, 9:16>>),
