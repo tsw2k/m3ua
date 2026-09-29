@@ -1397,6 +1397,36 @@ handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIA, params = Params},
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
+%% RFC4666, Section-4.3.4.4: "An ASP Inactive message MUST always be
+%% responded to by the peer", with an ASP Inactive Ack where the routing
+%% key is defined -- the asp already inactive included. Most often it
+%% is an asp this gateway displaced in an override application server
+%% (4.3.4.3), whose ASPIA crossed the NTFY Alternate ASP Active; it used
+%% to get an ERR, Unexpected Message, and take itself to be active
+%% still. Nothing changes here: the asp is where it asked to be.
+handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIA},
+		inactive, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr,
+		peer_port = PeerPort, ppid = Ppid, receiver = Receiver,
+		active = Active, assoc = Assoc, ep = EP, count = Count} = StateData) ->
+	?LOG_DEBUG("ASPIA acknowledged again",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			reason => already_inactive}),
+	AspInActiveAck = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIAACK},
+	Packet = m3ua_codec:m3ua(AspInActiveAck),
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+		ok ->
+			ok = m3ua_receiver:replenish(Receiver, Active),
+			InactiveIn = maps:get(inactive_in, Count, 0),
+			InactiveAckOut = maps:get(inactive_ack_out, Count, 0),
+			NewCount = maps:put(inactive_in, InactiveIn + 1, Count),
+			NextCount = maps:put(inactive_ack_out, InactiveAckOut + 1, NewCount),
+			{next_state, inactive, StateData#statedata{count = NextCount}};
+		{error, eagain} ->
+			% @todo flow control
+			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
+		{error, Reason} ->
+			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
+	end;
 handle_sgp(#m3ua{class = ?TransferMessage,
 		type = ?TransferMessageData, params = Params},
 		_ActiveState, Stream, #statedata{receiver = Receiver, socket = _Socket,

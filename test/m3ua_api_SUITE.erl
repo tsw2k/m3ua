@@ -104,7 +104,7 @@ all() ->
 			asp_drst_dupu, asp_restricted_congestion,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
-			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
+			sgp_asp_up_inactive, sgp_aspia_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
 			sgp_transfer_rc, sgp_static_register, lifecycle_contained,
 			asp_sgp_one_node, copy_messages, asp_register_down,
 			sgp_register_down, asp_request_in_place, sgp_as_pending,
@@ -453,6 +453,26 @@ sgp_asp_up_inactive(_Config) ->
 	inactive = m3ua:asp_status(EP, Assoc),
 	{ok, Counts} = m3ua:getcount(EP, Assoc),
 	#{up_in := 2, up_ack_out := 2} = Counts,
+	false = maps:is_key(error_out, Counts),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+sgp_aspia_inactive() ->
+	[{userdata, [{doc, "An ASPIA at an inactive asp is acknowledged, not answered with an ERR, and changes nothing (RFC 4666 4.3.4.4)."}]}].
+
+sgp_aspia_inactive(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_asp(),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	inactive = m3ua:asp_status(EP, Assoc),
+	%% As an asp displaced in an override server sends it, having missed
+	%% or crossed the NTFY: an acknowledgement, and no ERR after it.
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPIA)),
+	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPIAACK),
+	nothing_sent = raw_get(Peer),
+	inactive = m3ua:asp_status(EP, Assoc),
+	{ok, Counts} = m3ua:getcount(EP, Assoc),
+	#{inactive_in := 1, inactive_ack_out := 1} = Counts,
 	false = maps:is_key(error_out, Counts),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
