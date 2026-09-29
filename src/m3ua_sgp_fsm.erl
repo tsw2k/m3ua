@@ -2282,7 +2282,16 @@ state_traffic_maint1([RC | T], Event,
 		#statedata{ep = EP, assoc = Assoc} = StateData) ->
 	F = fun() -> state_traffic_maint2(RC, Event) end,
 	case mnesia:transaction(F) of
-		{atomic, NotifyFsms} ->
+		{atomic, {NotifyFsms, Recovery}} ->
+			%% T(r) belongs to layer management and not to this state
+			%% machine, which the ASPDN or association loss that set it
+			%% running may well end.
+			case Recovery of
+				start ->
+					gen_server:cast(m3ua, {'T(r)', start, RC});
+				none ->
+					ok
+			end,
 			F3 = fun({Fsm, pending}) ->
 						ok = gen_statem:cast(Fsm, {'M-NOTIFY', as_pending, RC});
 					({Fsm, inactive}) ->
@@ -2323,9 +2332,15 @@ state_traffic_maint2(RC, Event) ->
 	Factive = fun(#m3ua_as_asp{fsm = Fsm}, Acc) ->
 				[{Fsm, active} | Acc]
 	end,
+	Fpending = fun(#m3ua_as_asp{fsm = Fsm, state = inactive}, Acc) ->
+				[{Fsm, pending} | Acc];
+			(_, Acc) ->
+				Acc
+	end,
+	Tr = application:get_env(m3ua, recovery_timer, ?RECOVERY_TIMER),
 	case mnesia:read(m3ua_as, RC, write) of
 		[] ->
-			[];
+			{[], none};
 		[#m3ua_as{asp = Asps, state = AsState, min_asp = Min} = AS] ->
 			case lists:keytake(self(), #m3ua_as_asp.fsm, Asps) of
 				{value, Asp, RemAsp} ->
@@ -2341,41 +2356,61 @@ state_traffic_maint2(RC, Event) ->
 					end,
 					NewAsp = Asp#m3ua_as_asp{state = AspState},
 					NewAsps = [NewAsp | RemAsp],
-					case lists:foldl(Fcount, {0, 0}, NewAsps) of
+					{Notify, Recovery} = case lists:foldl(Fcount, {0, 0}, NewAsps) of
+						%% AC2PN (RFC 4666 4.3.2): the last active process
+						%% gone, the server waits T(r) for another before
+						%% it is inactive or down, and the processes still
+						%% inactive are told it is pending (4.3.4.4), which
+						%% is their cue to take over.
+						{0, _} when AsState == active, Tr > 0 ->
+							NewAS = AS#m3ua_as{state = pending, asp = NewAsps},
+							mnesia:write(NewAS),
+							{lists:foldl(Fpending, [], NewAsps), start};
+						%% Pending until T(r) or an active process says
+						%% otherwise, whatever else changes meanwhile.
+						{0, _} when AsState == pending ->
+							NewAS = AS#m3ua_as{asp = NewAsps},
+							mnesia:write(NewAS),
+							{[], none};
+						%% PN2AC.
+						{NumActive, _} when AsState == pending, NumActive > 0 ->
+							NewAS = AS#m3ua_as{state = active, asp = NewAsps},
+							mnesia:write(NewAS),
+							{lists:foldl(Factive, [], NewAsps), none};
 						{0, 0} when AsState == down ->
 							NewAS = AS#m3ua_as{state = down, asp = NewAsps},
 							mnesia:write(NewAS),
-							[];
+							{[], none};
 						{0, 0} ->
-							% @todo pending state with recovery timer T(r)
 							NewAS = AS#m3ua_as{state = down, asp = NewAsps},
 							mnesia:write(NewAS),
-							lists:foldl(Fdown, [], NewAsps);
+							{lists:foldl(Fdown, [], NewAsps), none};
 						{0, NumInactive} when NumInactive > 0, AsState == inactive ->
 							NewAS = AS#m3ua_as{state = inactive, asp = NewAsps},
 							mnesia:write(NewAS),
-							[];
+							{[], none};
 						{0, NumInactive} when NumInactive > 0 ->
 							NewAS = AS#m3ua_as{state = inactive, asp = NewAsps},
 							mnesia:write(NewAS),
-							lists:foldl(Finactive, [], NewAsps);
+							{lists:foldl(Finactive, [], NewAsps), none};
 						{NumActive, NumInactive} when AsState == inactive,
 								NumActive < Min, NumInactive > 0 ->
 							NewAS = AS#m3ua_as{state = inactive, asp = NewAsps},
 							mnesia:write(NewAS),
-							[];
+							{[], none};
 						{NumActive, _NumInactive}
 								when AsState == inactive, NumActive >= Min ->
 							NewAS = AS#m3ua_as{state = active, asp = NewAsps},
 							mnesia:write(NewAS),
-							lists:foldl(Factive, [], NewAsps);
+							{lists:foldl(Factive, [], NewAsps), none};
 						{_NumActive, _NumInactive} ->
 							NewAS = AS#m3ua_as{asp = NewAsps},
 							mnesia:write(NewAS),
-							[]
-					end;
+							{[], none}
+					end,
+					{Notify, Recovery};
 				false ->
-					[]
+					{[], none}
 			end
 	end.
 

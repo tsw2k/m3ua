@@ -31,6 +31,14 @@
 -define(M3UA_RECBUF, 262144).
 -define(M3UA_SNDBUF, 262144).
 
+%% T(r), the recovery timer an application server waits in AS-PENDING
+%% for another process to become active (RFC 4666 4.3.2), in
+%% milliseconds, unless the application's `recovery_timer' says
+%% otherwise; 0 turns AS-PENDING off. RFC 4666 leaves it to the
+%% operator; 2000 is Cisco ITP's `recovery-timeout' default and the top
+%% of its range.
+-define(RECOVERY_TIMER, 2000).
+
 -define(MGMTMessage,       0).
 -define(TransferMessage,   1).
 -define(SSNMMessage,       2).

@@ -44,7 +44,8 @@
 		fsms = gb_trees:empty() :: gb_trees:tree(EP :: pid(),
 				Assoc :: gen_sctp:assoc_id()),
 		reqs = gb_trees:empty() :: gb_trees:tree(Ref :: reference(),
-				From :: pid())}).
+				From :: pid()),
+		recovery = #{} :: #{RC :: 0..4294967295 => reference()}}).
 
 -include("m3ua.hrl").
 -include_lib("kernel/include/inet_sctp.hrl").
@@ -601,6 +602,23 @@ handle_cast({AspOp, confirm, Ref, Result},
 					reason => no_request_outstanding}),
 			{noreply, State}
 	end;
+handle_cast({'T(r)', start, RC}, #state{recovery = Recovery} = State) ->
+	%% An application server gone AS-PENDING (m3ua_sgp_fsm). Kept here
+	%% rather than in the state machine that saw it go, which its own
+	%% ASPDN or a lost association may end within T(r). A second start
+	%% for the same server replaces the first.
+	case maps:find(RC, Recovery) of
+		{ok, Old} ->
+			_ = erlang:cancel_timer(Old);
+		error ->
+			ok
+	end,
+	Tr = application:get_env(m3ua, recovery_timer, ?RECOVERY_TIMER),
+	TRef = erlang:start_timer(Tr, self(), {'T(r)', RC}),
+	?LOG_NOTICE("Application server pending",
+			#{layer => m3ua, rc => RC, timer => Tr,
+			reason => no_active_asp}),
+	{noreply, State#state{recovery = Recovery#{RC => TRef}}};
 handle_cast(Request, State) ->
 	stray(cast, Request, undefined),
 	{noreply, State}.
@@ -664,6 +682,16 @@ handle_info({'EXIT', Pid, _Reason},
 					NewState = State#state{fsms = NewFsms},
 					{noreply, NewState}
 			end
+	end;
+handle_info({timeout, TRef, {'T(r)', RC}},
+		#state{recovery = Recovery} = State) ->
+	case maps:find(RC, Recovery) of
+		{ok, TRef} ->
+			ok = recovered(RC),
+			{noreply, State#state{recovery = maps:remove(RC, Recovery)}};
+		_ ->
+			%% Replaced by a later start: that one decides.
+			{noreply, State}
 	end;
 handle_info(Info, State) ->
 	stray(info, Info, undefined),
@@ -786,3 +814,42 @@ adopt(#state{ep_sup_sup = EPSupSup, eps = EPs} = State) ->
 	end,
 	State#state{eps = NewEPs}.
 
+%% @hidden
+%% 	T(r) expired (RFC 4666 4.3.2). A server still pending has had no
+%% 	process become active in time: PN2IA where one is inactive, told to
+%% 	the inactive ones as the state machines tell any fall to inactive,
+%% 	and PN2DN where none is. A server that became active meanwhile was
+%% 	taken out of pending by the process that did it, and is left alone.
+recovered(RC) ->
+	F = fun() ->
+			case mnesia:read(m3ua_as, RC, write) of
+				[#m3ua_as{state = pending, asp = ASPs} = AS] ->
+					case [Fsm || #m3ua_as_asp{fsm = Fsm, state = inactive}
+							<- ASPs] of
+						[] ->
+							mnesia:write(AS#m3ua_as{state = down}),
+							{down, []};
+						Inactive ->
+							mnesia:write(AS#m3ua_as{state = inactive}),
+							{inactive, Inactive}
+					end;
+				_ ->
+					none
+			end
+	end,
+	case mnesia:transaction(F) of
+		{atomic, {AsState, Fsms}} ->
+			?LOG_NOTICE("Application server not recovered",
+					#{layer => m3ua, rc => RC, state => AsState,
+					reason => 'T(r)'}),
+			lists:foreach(fun(Fsm) ->
+						gen_statem:cast(Fsm, {'M-NOTIFY', as_inactive, RC})
+					end, Fsms);
+		{atomic, none} ->
+			ok;
+		{aborted, Reason} ->
+			?LOG_ERROR("Application server state not updated",
+					#{layer => m3ua, rc => RC, event => 'T(r)',
+					reason => Reason}),
+			ok
+	end.

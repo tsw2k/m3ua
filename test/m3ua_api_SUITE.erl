@@ -106,7 +106,7 @@ all() ->
 			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
 			sgp_transfer_rc, sgp_static_register, lifecycle_contained,
 			asp_sgp_one_node, copy_messages, asp_register_down,
-			sgp_register_down, asp_request_in_place,
+			sgp_register_down, asp_request_in_place, sgp_as_pending,
 			sgp_deregister_local, sgp_deregister_named, asp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
@@ -815,6 +815,62 @@ asp_request_in_place(_Config) ->
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 
+sgp_as_pending() ->
+	[{userdata, [{doc, "An override AS whose last active ASP goes inactive is pending for T(r), and the inactive one is told: taken over within it, the AS is active again; not, it is inactive."}]}].
+
+sgp_as_pending(_Config) ->
+	ok = application:set_env(m3ua, recovery_timer, 600),
+	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+			[{role, sgp}, {static, true}, {ip, {127,0,0,1}}]),
+	{_, server, sgp, {_, Port}} = m3ua:get_ep(EP),
+	RC = unused_rc(),
+	Name = make_ref(),
+	Keys = [{rand:uniform(16383), [], []}],
+	{ok, _} = m3ua:as_add(Name, RC, undefined, Keys, override, 1, 2),
+	Connect = fun() ->
+				{ok, P} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+				{ok, #sctp_assoc_change{state = comm_up, assoc_id = PA}} =
+						gen_sctp:connect(P, {127,0,0,1}, Port, []),
+				ok = raw_put(P, PA, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+				#m3ua{} = raw_expect(P, ?ASPSMMessage, ?ASPSMASPUPACK),
+				{P, PA}
+			end,
+	{Peer1, PeerAssoc1} = Connect(),
+	{Peer2, PeerAssoc2} = Connect(),
+	Assocs = assoc(EP, 40),
+	2 = length(Assocs),
+	ok = lists:foreach(fun(A) ->
+				{ok, RC} = m3ua:register(EP, A, RC, undefined, Keys,
+						override, Name)
+			end, Assocs),
+	ok = raw_put(Peer1, PeerAssoc1, raw_msg(?ASPTMMessage, ?ASPTMASPAC)),
+	#m3ua{} = raw_expect(Peer1, ?ASPTMMessage, ?ASPTMASPACACK),
+	ok = as_state(RC, active, 20),
+	flush_sctp(Peer2),
+	%% The active one goes: pending, and the standby is told so.
+	ok = raw_put(Peer1, PeerAssoc1, raw_msg(?ASPTMMessage, ?ASPTMASPIA)),
+	#m3ua{} = raw_expect(Peer1, ?ASPTMMessage, ?ASPTMASPIAACK),
+	ok = as_state(RC, pending, 20),
+	as_pending = raw_notify(Peer2, as_pending),
+	%% Taken over within T(r): active again, and it stays so past T(r).
+	ok = raw_put(Peer2, PeerAssoc2, raw_msg(?ASPTMMessage, ?ASPTMASPAC)),
+	#m3ua{} = raw_expect(Peer2, ?ASPTMMessage, ?ASPTMASPACACK),
+	ok = as_state(RC, active, 20),
+	timer:sleep(800),
+	[#m3ua_as{state = active}] = mnesia:dirty_read(m3ua_as, RC),
+	%% Not taken over: pending, then inactive once T(r) runs out.
+	flush_sctp(Peer1),
+	ok = raw_put(Peer2, PeerAssoc2, raw_msg(?ASPTMMessage, ?ASPTMASPIA)),
+	#m3ua{} = raw_expect(Peer2, ?ASPTMMessage, ?ASPTMASPIAACK),
+	ok = as_state(RC, pending, 20),
+	ok = as_state(RC, inactive, 40),
+	as_inactive = raw_notify(Peer1, as_inactive),
+	ok = application:unset_env(m3ua, recovery_timer),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer1),
+	ok = gen_sctp:close(Peer2),
+	ok = m3ua:as_delete(RC).
+
 %% @hidden
 %% 	Wait for an application server to reach a state, 50 ms at a time.
 as_state(_RC, _State, 0) ->
@@ -826,6 +882,35 @@ as_state(RC, State, N) ->
 		_ ->
 			timer:sleep(50),
 			as_state(RC, State, N - 1)
+	end.
+
+%% @hidden
+%% 	`Status' once a raw peer receives a NTFY carrying it, passing over
+%% 	anything else; `nothing_sent' if none comes.
+raw_notify(Peer, Status) ->
+	case raw_get(Peer) of
+		#m3ua{class = ?MGMTMessage, type = ?MGMTNotify, params = Params} ->
+			case m3ua_codec:fetch_parameter(?Status,
+					m3ua_codec:parameters(Params)) of
+				Status ->
+					Status;
+				_Other ->
+					raw_notify(Peer, Status)
+			end;
+		nothing_sent ->
+			nothing_sent;
+		_Other ->
+			raw_notify(Peer, Status)
+	end.
+
+%% @hidden
+flush_sctp(Peer) ->
+	receive
+		{sctp, Peer, _, _, _} ->
+			flush_sctp(Peer)
+	after
+		100 ->
+			ok
 	end.
 
 %% @hidden
