@@ -106,7 +106,8 @@ all() ->
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
 			sgp_asp_up_inactive, sgp_aspia_inactive, sgp_asptm_rc, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
-			sgp_transfer_rc, sgp_static_register, lifecycle_contained,
+			sgp_transfer_rc, data_nodelay, sgp_static_register,
+			lifecycle_contained,
 			asp_sgp_one_node, copy_messages, asp_register_down,
 			sgp_register_down, asp_request_in_place, sgp_as_pending,
 			sgp_as_pending_on_loss, sgp_override_takeover, asp_alternate_active,
@@ -655,6 +656,25 @@ sgp_transfer_rc(_Config) ->
 	true = is_integer(Stream) andalso Stream > 0,
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+data_nodelay() ->
+	[{userdata, [{doc, "DATA sent back to back leaves at once, from an asp's socket and from an sgp's peeled off one, rather than waiting for the peer's delayed SACK."}]}].
+
+data_nodelay(_Config) ->
+	%% With Nagle on, a DATA sent while the one before is unacknowledged
+	%% waits for its SACK, and a peer delays that 200 ms. The time from
+	%% the first send to the last arrival shows which it was; the same
+	%% with sctp_nodelay turned off is logged beside it, to show what
+	%% the case would see if it were.
+	Asp = back_to_back(asp, []),
+	AspNagle = back_to_back(asp, [{sctp_nodelay, false}]),
+	Sgp = back_to_back(sgp, []),
+	SgpNagle = back_to_back(sgp, [{sctp_nodelay, false}]),
+	ct:pal("Five DATA back to back, first sent to last received, ms: "
+			"asp ~.1f (Nagle ~.1f), sgp ~.1f (Nagle ~.1f)",
+			[Asp, AspNagle, Sgp, SgpNagle]),
+	true = Asp < 100,
+	true = Sgp < 100.
 
 sgp_static_register() ->
 	[{userdata, [{doc, "A routing key registered by layer management at a static gateway after ASPAC makes its application server active at once, and says so."}]}].
@@ -1353,11 +1373,14 @@ raw_sg() ->
 	raw_sg(callback(make_ref())).
 %% @hidden
 raw_sg(Callback) ->
+	raw_sg(Callback, []).
+%% @hidden
+raw_sg(Callback, Options) ->
 	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
 	ok = gen_sctp:listen(Peer, true),
 	{ok, {_, Port}} = inet:sockname(Peer),
 	{ok, EP} = m3ua:start(Callback, 0,
-			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
+			[{role, asp}, {connect, {127,0,0,1}, Port, []} | Options]),
 	PeerAssoc = receive
 		{sctp, Peer, _, _, {_, #sctp_assoc_change{state = comm_up,
 				assoc_id = Id}}} ->
@@ -1377,8 +1400,11 @@ raw_asp() ->
 	raw_asp(callback(make_ref())).
 %% @hidden
 raw_asp(Callback) ->
+	raw_asp(Callback, []).
+%% @hidden
+raw_asp(Callback, Options) ->
 	{ok, EP} = m3ua:start(Callback, 0,
-			[{role, sgp}, {ip, {127,0,0,1}}]),
+			[{role, sgp}, {ip, {127,0,0,1}} | Options]),
 	{_, server, sgp, {_, Port}} = m3ua:get_ep(EP),
 	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
 	{ok, #sctp_assoc_change{state = comm_up, assoc_id = PeerAssoc}} =
@@ -1396,6 +1422,60 @@ raw_send(Peer, PeerAssoc, Packet) ->
 			m3ua_codec:fetch_parameter(?ErrorCode, Parameters);
 		nothing_sent ->
 			nothing_sent
+	end.
+
+%% @hidden
+%% 	An active asp or sgp, facing a plain SCTP peer, sends five DATA as
+%% 	fast as it is asked to: the milliseconds from the first send to
+%% 	the last arrival.
+back_to_back(Role, Options) ->
+	Ref = make_ref(),
+	DPC = rand:uniform(16383),
+	OPC = rand:uniform(16383),
+	{Peer, _PeerAssoc, EP, Fsm} = active(Role, Ref, DPC, OPC, Options),
+	T0 = erlang:monotonic_time(microsecond),
+	[ok = m3ua:transfer(Fsm, 1, undefined, OPC, DPC, 0, 3, SLS, <<SLS>>)
+			|| SLS <- lists:seq(1, 5)],
+	ok = arrived(Peer, 5),
+	T1 = erlang:monotonic_time(microsecond),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer),
+	(T1 - T0) / 1000.
+
+%% @hidden
+active(asp, Ref, _DPC, _OPC, Options) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(sgp_cb(Ref), Options),
+	Asp = wait(Ref),
+	Self = self(),
+	spawn_link(fun() -> Self ! {up, m3ua:asp_up(EP, Assoc)} end),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUP),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUPACK)),
+	receive {up, ok} -> ok after 2000 -> ct:fail(asp_up) end,
+	spawn_link(fun() -> Self ! {active, m3ua:asp_active(EP, Assoc)} end),
+	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPAC),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPACACK)),
+	receive {active, ok} -> ok after 2000 -> ct:fail(asp_active) end,
+	{Peer, PeerAssoc, EP, Asp};
+active(sgp, Ref, DPC, _OPC, Options) ->
+	{Peer, PeerAssoc, EP, _Assoc} = raw_asp(sgp_cb(Ref), Options),
+	Sgp = wait(Ref),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	_RC = raw_register(Peer, PeerAssoc, undefined, [{DPC, [], []}]),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPAC)),
+	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPACACK),
+	{Peer, PeerAssoc, EP, Sgp}.
+
+%% @hidden
+%% 	N DATA at the peer, passing over any NTFY.
+arrived(_Peer, 0) ->
+	ok;
+arrived(Peer, N) ->
+	case raw_expect(Peer, ?TransferMessage, ?TransferMessageData) of
+		#m3ua{} ->
+			arrived(Peer, N - 1);
+		Other ->
+			{missing, N, Other}
 	end.
 
 %% @hidden
