@@ -143,7 +143,7 @@ init([Sup, Callback, Opts] = _Args) ->
 					remote_opts = Ropts},
 			ok = m3ua_status:endpoint(#{name => Name, mode => connect,
 					role => Role, remote => {[Raddr], Rport}, ended => 0}),
-			{ok, connecting, StateData, {timeout, 0, timeout}};
+			{ok, connecting, StateData, {{timeout, retry}, 0, connect}};
 		false ->
 			{stop, badarg}
 	end.
@@ -154,10 +154,10 @@ init([Sup, Callback, Opts] = _Args) ->
 %% @doc Handle events received in the <b>connecting</b> state.
 %% @private
 %%
-connecting(timeout, EventContent,
+connecting({timeout, retry}, connect,
 		#statedata{fsm_sup = undefined} = StateData) ->
-	connecting(timeout, EventContent, get_sup(StateData));
-connecting(timeout, _EventContent, #statedata{options = LocalOptions,
+	connecting({timeout, retry}, connect, get_sup(StateData));
+connecting({timeout, retry}, connect, #statedata{options = LocalOptions,
 		remote_addr = RemoteAddress, remote_port = RemotePort,
 		remote_opts = ConnectOptions, name = Name} = StateData) ->
 	case m3ua_sctp:open(LocalOptions) of
@@ -187,7 +187,7 @@ connecting(timeout, _EventContent, #statedata{options = LocalOptions,
 									local_addr = undefined,
 									local_port = undefined},
 							{next_state, connecting, NewStateData,
-										{timeout, ?ERROR_WAIT, timeout}}
+										{{timeout, retry}, ?ERROR_WAIT, connect}}
 					end;
 				{error, ReasonPort} ->
 					?LOG_ERROR("Socket has no local address",
@@ -266,37 +266,24 @@ code_change(_OldVsn, StateName, StateData, _Extra) ->
 	Result :: gen_statem:event_handler_result(atom()).
 %% @doc Handle events common to all states.
 %% @hidden
-handle_event({call, From}, getassoc, connecting,
+%% The wait before connecting again is a generic timeout, `retry',
+%% which no other event cancels. It used to be an event timeout, which
+%% any event does cancel: these calls asked for it again, and restarted
+%% it, and getep did not, so an endpoint asked for its details while it
+%% waited never connected again.
+handle_event({call, From}, getassoc, StateName,
 		#statedata{assoc = undefined} = StateData) ->
-	{next_state, connecting, StateData,
-			[{reply, From, []}, {timeout, ?RETRY_WAIT, timeout}]};
-handle_event({call, From}, getassoc, connected,
-		#statedata{assoc = undefined} = StateData) ->
-	{next_state, connected, StateData, {reply, From, []}};
-handle_event({call, From}, getassoc, connecting,
+	{next_state, StateName, StateData, {reply, From, []}};
+handle_event({call, From}, getassoc, StateName,
 		#statedata{assoc = Assoc} = StateData) ->
-	{next_state, connecting, StateData,
-			[{reply, From, [Assoc]}, {timeout, ?RETRY_WAIT, timeout}]};
-handle_event({call, From}, getassoc, connected,
-		#statedata{assoc = Assoc} = StateData) ->
-	{next_state, connected, StateData, {reply, From, [Assoc]}};
-handle_event({call, From}, {getstat, undefined}, connecting,
+	{next_state, StateName, StateData, {reply, From, [Assoc]}};
+handle_event({call, From}, {getstat, undefined}, StateName,
 		#statedata{socket = Socket} = StateData) ->
-	{next_state, connecting, StateData,
-			[{reply, From, m3ua_sctp:getstat(Socket)},
-			{timeout, ?RETRY_WAIT, timeout}]};
-handle_event({call, From}, {getstat, undefined}, connected,
-		#statedata{socket = Socket} = StateData) ->
-	{next_state, connected, StateData,
+	{next_state, StateName, StateData,
 			{reply, From, m3ua_sctp:getstat(Socket)}};
-handle_event({call, From}, {getstat, Options}, connecting,
+handle_event({call, From}, {getstat, Options}, StateName,
 		#statedata{socket = Socket} = StateData) ->
-	{next_state, connecting, StateData,
-			[{reply, From, m3ua_sctp:getstat(Socket, Options)},
-			{timeout, ?RETRY_WAIT, timeout}]};
-handle_event({call, From}, {getstat, Options}, connected,
-		#statedata{socket = Socket} = StateData) ->
-	{next_state, connected, StateData,
+	{next_state, StateName, StateData,
 			{reply, From, m3ua_sctp:getstat(Socket, Options)}};
 handle_event({call, From}, getep, StateName,
 		#statedata{name = Name, role = Role,
@@ -311,14 +298,20 @@ handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort,
 	NewStateData = StateData#statedata{socket = Socket, assoc = Assoc},
 	handle_connect(AssocChange, NewStateData);
 handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort,
-		{_AncData, #sctp_assoc_change{state = _Reason}}}, connecting,
-		#statedata{socket = Socket, receiver = Receiver} = StateData) ->
+		{_AncData, #sctp_assoc_change{state = State}}}, connecting,
+		#statedata{socket = Socket, receiver = Receiver, name = Name,
+		remote_addr = Address, remote_port = Port} = StateData) ->
+	%% The peer did not answer the INIT in time, or refused it.
+	?LOG_WARNING("Connect failed",
+			#{layer => m3ua, ep => self(), name => Name,
+			remote => {Address, Port}, reason => State}),
 	m3ua_receiver:stop(Receiver),
 	m3ua_sctp:close(Socket),
 	NewStateData = StateData#statedata{socket = undefined,
-			receiver = undefined},
+			receiver = undefined, local_addr = undefined,
+			local_port = undefined},
 	{next_state, connecting, NewStateData,
-			{timeout, ?RETRY_WAIT, timeout}};
+			{{timeout, retry}, ?RETRY_WAIT, connect}};
 handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort, {_AncData, Event}},
 		StateName, #statedata{socket = Socket,
 		receiver = Receiver} = StateData)
@@ -351,7 +344,7 @@ handle_event(info, {'EXIT', Fsm, {shutdown, {{EP, Assoc}, Reason}}},
 	NewStateData = ended(StateData#statedata{socket = undefined,
 			receiver = undefined, fsm = undefined, assoc = undefined,
 			local_addr = undefined, local_port = undefined}),
-	{next_state, connecting, NewStateData, {timeout, 0, timeout}};
+	{next_state, connecting, NewStateData, {{timeout, retry}, 0, connect}};
 handle_event(info, {'EXIT', Fsm, Reason}, _StateName,
 		#statedata{socket = undefined, fsm = Fsm} = StateData) ->
 	{stop, Reason, StateData};
@@ -361,12 +354,7 @@ handle_event(info, {'EXIT', Fsm, Reason}, _StateName,
 	{stop, Reason, StateData};
 %% What is left linked is the layer manager, which m3ua_sup restarts on
 %% its own and whose successor links this endpoint again. Its death is
-%% no reason for the endpoint to die. Waiting to try again, the wait is
-%% asked for again: an event timeout is cancelled by any event.
-handle_event(info, {'EXIT', _Pid, _Reason}, connecting,
-		#statedata{socket = undefined} = StateData) ->
-	{next_state, connecting, StateData,
-			{timeout, ?RETRY_WAIT, timeout}};
+%% no reason for the endpoint to die.
 handle_event(info, {'EXIT', _Pid, _Reason}, StateName, StateData) ->
 	{next_state, StateName, StateData};
 handle_event(cast, _Event, _StateName, StateData) ->
@@ -455,7 +443,7 @@ not_connected(Stage, Reason, #sctp_assoc_change{assoc_id = Assoc},
 			receiver = undefined, local_addr = undefined,
 			local_port = undefined}),
 	{next_state, connecting, NewStateData,
-			{timeout, ?RETRY_WAIT, timeout}}.
+			{{timeout, retry}, ?RETRY_WAIT, connect}}.
 
 %% @hidden
 ended(#statedata{ended = Ended} = StateData) ->

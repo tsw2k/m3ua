@@ -99,7 +99,8 @@ all() ->
 	[start, stop, listen, connect, release, protocol_identifier,
 			connect_options, connect_device, sctp_timers, stop_endpoint, lm_stray,
 			reconnect_in_place,
-			listen_not_accepted, connect_not_taken, asp_states,
+			listen_not_accepted, connect_not_taken, connect_retry_asked,
+			asp_states,
 			endpoint_gives_up, lm_restart, callback_raised, asp_up_ack_unexpected,
 			asp_drst_dupu, asp_restricted_congestion,
 			undecodable, unexpected, registration_results, ack_timeout,
@@ -1882,6 +1883,28 @@ connect_not_taken(_Config) ->
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 
+connect_retry_asked() ->
+	[{userdata, [{doc, "An endpoint whose connect failed connects again after its wait, however often it is asked about meanwhile."}]}].
+
+connect_retry_asked(_Config) ->
+	%% A port nothing listens on: the INIT is refused.
+	{ok, Probe} = gen_sctp:open([{ip, {127,0,0,1}}]),
+	{ok, {_, Port}} = inet:sockname(Probe),
+	ok = gen_sctp:close(Probe),
+	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
+	%% Asked for its details and its associations while it waits, as
+	%% a management walk or a watchdog does. The wait used to be one
+	%% that any event cancelled or started again.
+	timeout = asked(EP, undefined, 4),
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}},
+			{port, Port}]),
+	ok = gen_sctp:listen(Peer, true),
+	ok = asked(EP, Peer, 40),
+	[_] = assoc(EP, 40),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
 asp_states() ->
 	[{userdata, [{doc, "Each endpoint and association is readable with no process asked: by name, state as it changes, counters within a second, and gone when it goes."}]}].
 
@@ -1993,6 +2016,21 @@ connect_device(_Config) ->
 	ok = gen_sctp:close(Peer).
 
 %% @hidden
+%% Ask an endpoint about itself every half second until the peer
+%% sees an association come up, or N times.
+asked(_EP, _Peer, 0) ->
+	timeout;
+asked(EP, Peer, N) ->
+	receive
+		{sctp, Peer, _, _, {_, #sctp_assoc_change{state = comm_up}}} ->
+			ok
+	after
+		500 ->
+			{_, client, asp, _, _} = m3ua:get_ep(EP),
+			_ = m3ua:get_assoc(EP),
+			asked(EP, Peer, N - 1)
+	end.
+
 comm_up(Peer) ->
 	receive
 		{sctp, Peer, _, _, {_, #sctp_assoc_change{state = comm_up}}} ->
