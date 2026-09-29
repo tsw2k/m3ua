@@ -505,7 +505,7 @@ cast(Fsm, Stream, RC, OPC, DPC, NI, SI, SLS, Data)
 		RCs :: [RC],
 		RC :: 0..4294967295,
 		APCs :: [APC],
-		APC :: 0..16777215.
+		APC :: m3ua_codec:apc().
 %% @doc Tell an ASP that SS7 destinations have become unavailable.
 %%
 %% 	The Destination Unavailable (DUNA) message of RFC 4666 3.4.1,
@@ -524,7 +524,7 @@ duna(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
 		RCs :: [RC],
 		RC :: 0..4294967295,
 		APCs :: [APC],
-		APC :: 0..16777215.
+		APC :: m3ua_codec:apc().
 %% @doc Tell an ASP that SS7 destinations are available again.
 %%
 %% 	The Destination Available (DAVA) message of RFC 4666 3.4.2. It
@@ -539,7 +539,7 @@ dava(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
 		RCs :: [RC],
 		RC :: 0..4294967295,
 		APCs :: [APC],
-		APC :: 0..16777215.
+		APC :: m3ua_codec:apc().
 %% @doc Tell an ASP that SS7 destinations are restricted.
 %%
 %% 	The Destination Restricted (DRST) message of RFC 4666 3.4.6,
@@ -554,7 +554,7 @@ drst(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
 		RCs :: [RC],
 		RC :: 0..4294967295,
 		APCs :: [APC],
-		APC :: 0..16777215.
+		APC :: m3ua_codec:apc().
 %% @doc Tell an ASP that the route to SS7 destinations is congested.
 %%
 %% 	The Signalling Congestion (SCON) message of RFC 4666 3.4.4.
@@ -567,7 +567,7 @@ scon(Fsm, RCs, APCs) ->
 		RCs :: [RC],
 		RC :: 0..4294967295,
 		APCs :: [APC],
-		APC :: 0..16777215,
+		APC :: m3ua_codec:apc(),
 		ConcernedDPC :: undefined | 0..16777215,
 		CongestionLevel :: undefined | 0..3.
 %% @doc The same, with the two optional parameters of RFC 4666 3.4.4.
@@ -593,7 +593,7 @@ scon(Fsm, RCs, APCs, ConcernedDPC, CongestionLevel)
 		RCs :: [RC],
 		RC :: 0..4294967295,
 		APCs :: [APC],
-		APC :: 0..16777215,
+		APC :: m3ua_codec:apc(),
 		User :: m3ua_codec:mtp3_user(),
 		Cause :: m3ua_codec:mtp3_cause().
 %% @doc Tell an ASP that an MTP3 User Part is unavailable at an SS7
@@ -612,7 +612,7 @@ dupu(Fsm, RCs, APCs, User, Cause)
 		RCs :: [RC],
 		RC :: 0..4294967295,
 		APCs :: [APC],
-		APC :: 0..16777215.
+		APC :: m3ua_codec:apc().
 %% @doc Ask a signalling gateway whether SS7 destinations are available.
 %%
 %% 	The Destination State Audit (DAUD) message of RFC 4666 3.4.3, sent
@@ -629,7 +629,7 @@ daud(Fsm, RCs, APCs) when is_pid(Fsm), is_list(RCs), is_list(APCs) ->
 		Fsm :: pid(),
 		Type :: byte(),
 		RCs :: [0..4294967295],
-		APCs :: [0..16777215],
+		APCs :: [m3ua_codec:apc()],
 		Optional :: [{integer(), term()}].
 %% @doc Send one SS7 signalling network management message.
 %%

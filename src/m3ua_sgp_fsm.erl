@@ -108,7 +108,7 @@
 %%%    <li><tt>RCs = [RC]</tt></li>
 %%%    <li><tt>RC = 0..4294967295</tt></li>
 %%%    <li><tt>APCs = [APC]</tt></li>
-%%%    <li><tt>APC = 0..16777215</tt></li>
+%%%    <li><tt>APC = 0..16777215 | {0..16777215, Mask}</tt>, Mask the number of wildcarded low-order bits (RFC 4666 3.4.1)</li>
 %%%    <li><tt>State = term() </tt></li>
 %%%    <li><tt>Result = {ok, NewState} | {error, Reason} </tt></li>
 %%%    <li><tt>NewState = term() </tt></li>
@@ -346,7 +346,7 @@
 		RCs :: [RC],
 		RC :: 0..4294967295,
 		APCs :: [APC],
-		APC :: 0..16777215,
+		APC :: m3ua_codec:apc(),
 		State :: term(),
 		Result :: {ok, State}.
 

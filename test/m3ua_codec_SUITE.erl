@@ -228,7 +228,15 @@ duna(_Config) ->
 	#m3ua{class = ?SSNMMessage, type = ?SSNMDUNA,
 			params = Decoded} = m3ua_codec:m3ua(Bin),
 	[[APC]] = m3ua_codec:get_all_parameter(?AffectedPointCode,
-			m3ua_codec:parameters(Decoded)).
+			m3ua_codec:parameters(Decoded)),
+	%% A range: the low three bits wildcarded, an ITU region (3.4.1).
+	%% It used not to decode.
+	Masked = [APC, {16#1234, 3}],
+	<<16#0012:16, 12:16, 0, 16#0a0b0c:24, 3, 16#1234:24>> =
+			m3ua_codec:parameters([{?AffectedPointCode, Masked}]),
+	[Masked] = m3ua_codec:get_all_parameter(?AffectedPointCode,
+			m3ua_codec:parameters(<<16#0012:16, 12:16, 0, 16#0a0b0c:24,
+			3, 16#1234:24>>)).
 
 dupu() ->
 	[{userdata, [{doc, "DUPU message encoding, and the MTP3-User identities of RFC 4666 3.4.5"}]}].

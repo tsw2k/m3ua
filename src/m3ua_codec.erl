@@ -28,7 +28,7 @@
 -export([add_parameter/3, store_parameter/3,
 		find_parameter/2, fetch_parameter/2, get_parameter/3,
 		get_all_parameter/2]).
--export_type([mtp3_user/0, mtp3_cause/0]).
+-export_type([mtp3_user/0, mtp3_cause/0, apc/0]).
 
 -include("m3ua.hrl").
 
@@ -533,6 +533,10 @@ fields(_, _) ->
 -type mtp3_user() :: sccp | tup | isup | broadband_isup
 						| satellite_isup | aal2signalling | bicc | gcp.
 
+-type apc() :: 0..16777215 | {0..16777215, Mask :: 0..255}.
+%% An Affected Point Code: the point code alone, or with the number of
+%% its low-order bits that are wildcarded (RFC 4666 3.4.1).
+
 -type mtp3_cause() :: unknown | unequipped_remote_user
 							| inaccessible_remote_user.
 
@@ -596,11 +600,15 @@ mtp3_cause(inaccessible_remote_user) -> 2.
 
 -spec affected_pc(APCs) -> APCs
 	when
-		APCs :: binary() | [APC],
-		APC :: 0..16777215.
+		APCs :: binary() | [apc()].
 %% @doc Codec for Affected Point Codes.
-%% 	RFC4666, Section-3.4.1
-%% @todo handle mask
+%% 	RFC4666, Section-3.4.1: each is a point code and a mask, the number
+%% 	of its low-order bits that are wildcarded, so that one names a
+%% 	range -- an ITU region with 3, an ANSI cluster with 8, the whole
+%% 	network with as many as the point code has. A point code with no
+%% 	mask is the integer alone, as ever; one with a mask is
+%% 	`{PC, Mask}'. A mask other than 0 used not to decode at all, and
+%% 	the whole message was answered with an ERR.
 %% @hidden
 affected_pc(APCs) ->
 	affected_pc(APCs, []).
@@ -608,9 +616,16 @@ affected_pc(APCs) ->
 affected_pc(<<0, APC:24, Rest/binary>>, Acc)
 		when (byte_size(Rest) rem 4) == 0 ->
 	affected_pc(Rest, [APC | Acc]);
+affected_pc(<<Mask, APC:24, Rest/binary>>, Acc)
+		when (byte_size(Rest) rem 4) == 0 ->
+	affected_pc(Rest, [{APC, Mask} | Acc]);
 affected_pc([APC | T], Acc)
-		when is_integer(APC), APC =< 16777215 ->
+		when is_integer(APC), APC >= 0, APC =< 16777215 ->
 	affected_pc(T, [<<0, APC:24>> | Acc]);
+affected_pc([{APC, Mask} | T], Acc)
+		when is_integer(APC), APC >= 0, APC =< 16777215,
+		is_integer(Mask), Mask >= 0, Mask =< 255 ->
+	affected_pc(T, [<<Mask, APC:24>> | Acc]);
 affected_pc(<<>>, Acc) ->
 	lists:reverse(Acc);
 affected_pc([], Acc) ->

@@ -131,7 +131,7 @@ status(_Stream, _RK, _DPCs, State) ->
 		RCs :: [RC],
 		RC :: 0..4294967295,
 		APCs :: [APC],
-		APC :: 0..16777215,
+		APC :: m3ua_codec:apc(),
 		User :: m3ua_codec:mtp3_user(),
 		Cause :: m3ua_codec:mtp3_cause(),
 		State :: term(),
@@ -150,7 +150,7 @@ unavailable_user(_Stream, _RCs, _APCs, _User, _Cause, State) ->
 	when
 		Stream :: pos_integer(),
 		RCs :: [0..4294967295],
-		APCs :: [0..16777215],
+		APCs :: [m3ua_codec:apc()],
 		State :: term(),
 		Result :: {ok, NewState} | {error, Reason},
 		NewState :: term(),
@@ -169,7 +169,7 @@ restricted(_Stream, _RCs, _APCs, State) ->
 	when
 		Stream :: pos_integer(),
 		RCs :: [0..4294967295],
-		APCs :: [0..16777215],
+		APCs :: [m3ua_codec:apc()],
 		Level :: 0..3 | undefined,
 		State :: term(),
 		Result :: {ok, NewState} | {error, Reason},
@@ -190,7 +190,7 @@ congestion(_Stream, _RCs, _APCs, _Level, State) ->
 		RCs :: [RC],
 		RC :: 0..4294967295,
 		APCs :: [APC],
-		APC :: 0..16777215,
+		APC :: m3ua_codec:apc(),
 		State :: term(),
 		Result :: {ok, State}.
 %% @doc A destination audit (DAUD) was received.
