@@ -836,7 +836,7 @@ sgp_register_down(_Config) ->
 	{ok, #sctp_assoc_change{state = comm_up, assoc_id = PeerAssoc}} =
 			gen_sctp:connect(Peer, {127,0,0,1}, Port, []),
 	[Assoc] = assoc(EP, 40),
-	down = m3ua:asp_status(EP, Assoc),
+	down = known(EP, Assoc, 40),
 	RC = unused_rc(),
 	Name = make_ref(),
 	Keys = [{rand:uniform(16383), [], []}],
@@ -864,6 +864,7 @@ sgp_register_down(_Config) ->
 	{ok, #sctp_assoc_change{state = comm_up}} =
 			gen_sctp:connect(Peer2, {127,0,0,1}, Port2, []),
 	[Assoc2] = assoc(EP2, 40),
+	down = known(EP2, Assoc2, 40),
 	{Micro2, {error, asp_down}} = timer:tc(m3ua, register,
 			[EP2, Assoc2, unused_rc(), undefined, Keys, override, Name]),
 	true = Micro2 < 1000000,
@@ -2041,6 +2042,20 @@ comm_up(Peer) ->
 	end.
 
 %% @hidden
+%% The state of an association the layer manager knows: the endpoint
+%% lists it as soon as it has handed it to a state machine, and the
+%% state machine tells the layer manager a moment later.
+known(EP, Assoc, 0) ->
+	m3ua:asp_status(EP, Assoc);
+known(EP, Assoc, N) ->
+	case m3ua:asp_status(EP, Assoc) of
+		{error, not_found} ->
+			timer:sleep(50),
+			known(EP, Assoc, N - 1);
+		State ->
+			State
+	end.
+
 assoc(_EP, 0) ->
 	[];
 assoc(EP, N) ->
