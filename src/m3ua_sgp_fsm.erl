@@ -515,6 +515,24 @@ down(timeout, _EventContent, #statedata{ep = EP, assoc = Assoc, receiver = undef
 			count = CbCount, receiver = Receiver, lm = whereis(m3ua)}};
 down(cast, {'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
 	handle_dereg(Event, down, StateData);
+%% A static registration asks nothing of the peer and may be made down,
+%% as at the asp (m3ua_asp_fsm): the process joins its server down and
+%% is carried from there by its ASPUP and ASPAC. It fell to the
+%% catch-all here and was discarded, and layer management's call timed
+%% out: on a node whose far end reconnected, a registration made the
+%% moment the association was up reached this state machine 20 ms
+%% before the peer's ASPUP and was lost for good. Anything else is
+%% refused at once rather than left to time out.
+down(cast, {'M-RK_REG', request, _, _, _, _, _, _, _} = Event,
+		#statedata{static = true} = StateData) ->
+	handle_reg(Event, down, StateData);
+down(cast, {'M-RK_REG', request, Ref, From, RC, _, _, _, _},
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	?LOG_NOTICE("Routing key registration refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc, rc => RC,
+			reason => asp_down}),
+	gen_server:cast(From, {'M-RK_REG', confirm, Ref, {error, asp_down}}),
+	{next_state, down, StateData};
 down({call, From}, {'MTP-TRANSFER', request, _Params},
 		#statedata{ep = EP, assoc = Assoc, count = Count} = StateData) ->
 	?LOG_NOTICE("MTP-TRANSFER refused",

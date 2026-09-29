@@ -106,6 +106,7 @@ all() ->
 			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
 			sgp_transfer_rc, sgp_static_register, lifecycle_contained,
 			asp_sgp_one_node, copy_messages, asp_register_down,
+			sgp_register_down,
 			sgp_deregister_local, sgp_deregister_named, asp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
@@ -738,6 +739,64 @@ asp_register_down(_Config) ->
 	nothing_sent = raw_get(Peer),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+sgp_register_down() ->
+	[{userdata, [{doc, "At a gateway, a static registration made before the peer's ASPUP is taken and carried into service by it; any other is refused at once."}]}].
+
+sgp_register_down(_Config) ->
+	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+			[{role, sgp}, {static, true}, {ip, {127,0,0,1}}]),
+	{_, server, sgp, {_, Port}} = m3ua:get_ep(EP),
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	{ok, #sctp_assoc_change{state = comm_up, assoc_id = PeerAssoc}} =
+			gen_sctp:connect(Peer, {127,0,0,1}, Port, []),
+	[Assoc] = assoc(EP, 40),
+	down = m3ua:asp_status(EP, Assoc),
+	RC = unused_rc(),
+	Name = make_ref(),
+	Keys = [{rand:uniform(16383), [], []}],
+	{ok, _} = m3ua:as_add(Name, RC, undefined, Keys, override, 1, 2),
+	%% Registered the moment the association is up, before the ASPUP:
+	%% discarded here once, and the call timed out.
+	{Micro, {ok, RC}} = timer:tc(m3ua, register,
+			[EP, Assoc, RC, undefined, Keys, override, Name]),
+	true = Micro < 1000000,
+	[#m3ua_as{asp = [#m3ua_as_asp{state = down}]}] =
+			mnesia:dirty_read(m3ua_as, RC),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPAC)),
+	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPACACK),
+	ok = as_state(RC, active, 20),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer),
+	ok = m3ua:as_delete(RC),
+	%% Not static: a registration is a REG REQ, for an asp that is up.
+	{ok, EP2} = m3ua:start(callback(make_ref()), 0,
+			[{role, sgp}, {ip, {127,0,0,1}}]),
+	{_, server, sgp, {_, Port2}} = m3ua:get_ep(EP2),
+	{ok, Peer2} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	{ok, #sctp_assoc_change{state = comm_up}} =
+			gen_sctp:connect(Peer2, {127,0,0,1}, Port2, []),
+	[Assoc2] = assoc(EP2, 40),
+	{Micro2, {error, asp_down}} = timer:tc(m3ua, register,
+			[EP2, Assoc2, unused_rc(), undefined, Keys, override, Name]),
+	true = Micro2 < 1000000,
+	ok = m3ua:stop(EP2),
+	ok = gen_sctp:close(Peer2).
+
+%% @hidden
+%% 	Wait for an application server to reach a state, 50 ms at a time.
+as_state(_RC, _State, 0) ->
+	{error, timeout};
+as_state(RC, State, N) ->
+	case mnesia:dirty_read(m3ua_as, RC) of
+		[#m3ua_as{state = State}] ->
+			ok;
+		_ ->
+			timer:sleep(50),
+			as_state(RC, State, N - 1)
+	end.
 
 %% @hidden
 %% 	The stream the next DATA arrives on, passing over the NTFY an sgp
