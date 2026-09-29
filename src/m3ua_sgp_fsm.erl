@@ -2526,12 +2526,15 @@ state_traffic_maint2(RC, Event) ->
 carrying_elsewhere(RC, RKs) ->
 	Fsm = self(),
 	lists:any(fun({RC1, _, _}) when RC1 =/= RC ->
-				case catch mnesia:dirty_read(m3ua_as, RC1) of
+				try mnesia:dirty_read(m3ua_as, RC1) of
 					[#m3ua_as{asp = ASPs}] ->
 						lists:any(fun(#m3ua_as_asp{fsm = F, state = S}) ->
 									F == Fsm andalso S == active
 								end, ASPs);
 					_ ->
+						false
+				catch
+					exit:_ ->
 						false
 				end;
 			(_) ->
