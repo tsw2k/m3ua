@@ -733,12 +733,16 @@ asp_sgp_one_node(_Config) ->
 	[Assoc] = assoc(ClientEP, 40),
 	ok = m3ua:asp_up(ClientEP, Assoc),
 	Keys = [{rand:uniform(16383), [], []}],
-	{ok, _RC} = m3ua:register(ClientEP, Assoc, undefined, undefined,
+	{ok, RC} = m3ua:register(ClientEP, Assoc, undefined, undefined,
 			Keys, loadshare),
 	ok = m3ua:asp_active(ClientEP, Assoc),
 	ct:sleep(200),
 	true = is_process_alive(Asp),
 	active = m3ua:asp_status(ClientEP, Assoc),
+	%% The gateway's server has the gateway's process alone in it, not
+	%% the asp beside it as well.
+	[#m3ua_as{state = active, asp = [#m3ua_as_asp{fsm = Sgp}]}] =
+			mnesia:dirty_read(m3ua_as, RC),
 	%% Nothing either state machine was written for.
 	ok = gen_statem:cast(Asp, lifecycle_contained),
 	ok = gen_statem:cast(Sgp, lifecycle_contained),
@@ -1222,7 +1226,7 @@ asp_deregister(_Config) ->
 			lrk_id = LrkId, status = registered, rc = RC}}]},
 	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(RegRsp)),
 	{ok, RC} = receive {register, RegResult} -> RegResult after 4000 -> timeout end,
-	[_] = as_asps(RC),
+	[_] = asp_registered(RC),
 	Dereg = fun() ->
 			_ = spawn(fun() ->
 					Self ! {deregister, m3ua:deregister(EP, Assoc, RC)}
@@ -1244,12 +1248,12 @@ asp_deregister(_Config) ->
 		4000 ->
 			timeout
 	end,
-	[_] = as_asps(RC),
+	[_] = asp_registered(RC),
 	%% Deregistered: it is not.
 	ok = Dereg(),
 	ok = raw_put(Peer, PeerAssoc, raw_dereg_rsp(RC, deregistered)),
 	ok = receive {deregister, Result2} -> Result2 after 4000 -> timeout end,
-	[] = as_asps(RC),
+	[] = asp_registered(RC),
 	RC = deregistered_rc(),
 	{ok, #{dereg_out := 2, dereg_rsp_in := 2}} = m3ua:getcount(EP, Assoc),
 	ok = m3ua:stop(EP),
@@ -1321,6 +1325,12 @@ raw_register(Peer, PeerAssoc, RC0, Keys) ->
 			m3ua_codec:get_all_parameter(?RegistrationResult,
 			m3ua_codec:parameters(RspParams)),
 	RC.
+
+%% @hidden
+%% 	The asps of this node registered for `RC'. An asp is not a member
+%% 	of the server in m3ua_as, which is a gateway's list.
+asp_registered(RC) ->
+	mnesia:dirty_match_object(m3ua_asp, #m3ua_asp{fsm = '_', rc = RC, rk = '_'}).
 
 %% @hidden
 as_asps(RC) ->

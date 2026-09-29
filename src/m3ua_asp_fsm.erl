@@ -2336,29 +2336,25 @@ routing_context(RC, Params) ->
 		AsState :: down | inactive | active | pending,
 		Reason :: term().
 %% @hidden
-reg_tables(RC, RK, Name, AspState) ->
+%% 	The asp's own registration is recorded in m3ua_asp, and the
+%% 	application server in m3ua_as where there is none yet, so that
+%% 	m3ua:get_as/0 lists it. The asp is not written into the server's
+%% 	list of members: that list is a signalling gateway's, and a gateway
+%% 	on the same node, sharing the table, counted this asp among its own
+%% 	processes -- in the server's state, in its NTFYs, and in the
+%% 	M-NOTIFY casts that used to end this process. Nor is a server
+%% 	already there rewritten: its key and name may be the gateway's.
+reg_tables(RC, RK, Name, _AspState) ->
 	Fsm = self(),
 	F = fun() ->
+			ok = mnesia:write(#m3ua_asp{fsm = Fsm, rc = RC, rk = RK}),
 			case mnesia:read(m3ua_as, RC, write) of
 				[] ->
-					ASPs = [#m3ua_as_asp{fsm = Fsm, state = AspState}],
-					AS = #m3ua_as{rc = RC, rk = RK, name = Name, asp = ASPs},
-					mnesia:write(AS),
-					ASP = #m3ua_asp{fsm = Fsm, rc = RC, rk = RK},
-					mnesia:write(ASP),
+					AS = #m3ua_as{rc = RC, rk = RK, name = Name},
+					ok = mnesia:write(AS),
 					AS#m3ua_as.state;
-				[#m3ua_as{asp = ASPs} = AS] ->
-					NewASPs = case lists:keymember(Fsm, #m3ua_as_asp.fsm, ASPs) of
-						true ->
-							ASPs;
-						false ->
-							[#m3ua_as_asp{fsm = Fsm, state = AspState} | ASPs]
-					end,
-					NewAS = AS#m3ua_as{rk = RK, name = Name, asp = NewASPs},
-					mnesia:write(NewAS),
-					ASP = #m3ua_asp{fsm = Fsm, rc = RC, rk = RK},
-					mnesia:write(ASP),
-					NewAS#m3ua_as.state
+				[#m3ua_as{state = AsState}] ->
+					AsState
 			end
 	end,
 	case mnesia:transaction(F) of
