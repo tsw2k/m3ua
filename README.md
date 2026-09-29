@@ -96,7 +96,7 @@ association:
   process, instead of dying and being restarted;
 - a connect endpoint whose connect fails -- the INIT unanswered after its
   retransmissions, or refused -- says so at warning and tries again 8 s
-  later, or 60 s later where the connect call itself failed, with no
+  later, or 30 s later where the connect call itself failed, with no
   backoff and no end. Asking the endpoint about itself meanwhile
   (`m3ua:get_ep/1`, `get_assoc/1`, `getstat`) no longer stops or delays
   that;

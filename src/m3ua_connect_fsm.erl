@@ -59,7 +59,7 @@
 		callback :: {Module :: atom(), State :: term()}}).
 
 -define(RETRY_WAIT, 8000).
--define(ERROR_WAIT, 60000).
+-define(ERROR_WAIT, 30000).
 
 %%----------------------------------------------------------------------
 %%  The m3ua_connect_fsm gen_statem callbacks
