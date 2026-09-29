@@ -1266,6 +1266,24 @@ report_discarding(Cb, EP, Assoc) ->
 	end.
 
 %% @hidden
+%% 	Taken out by the gateway for an alternate ASP active.
+alternate(RCs, #statedata{cb_state = CbState, ep = EP,
+		assoc = Assoc} = StateData) ->
+	case state_traffic_maint(RCs, inactive, StateData) of
+		ok ->
+			{NewCbState, CbCount} = lifecycle(asp_inactive, [CbState],
+					StateData),
+			?LOG_NOTICE("ASP inactive, an alternate ASP is active",
+					#{layer => m3ua, ep => EP, assoc => Assoc,
+					reason => alternate_asp_active}),
+			report_carrying(active, inactive, EP, Assoc),
+			{next_state, inactive, StateData#statedata{
+					cb_state = NewCbState, count = CbCount}};
+		{error, Reason} ->
+			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
+	end.
+
+%% @hidden
 %% 	A local request for the state the asp is already in: answered at
 %% 	once, since there is nothing to ask of the peer. It fell to the
 %% 	catch-all and was discarded, so the caller waited out its timeout:
@@ -1424,8 +1442,20 @@ handle_asp(#m3ua{class = ?MGMTMessage, type = ?MGMTNotify, params = Params},
 	ok = m3ua_receiver:replenish(Receiver, Active),
 	NotifyIn = maps:get(notify_in, Count1, 0),
 	NewCount = maps:put(notify_in, NotifyIn + 1, Count1),
-	{next_state, StateName, StateData#statedata{count = NewCount,
-			cb_state = NewCbState}};
+	NextStateData = StateData#statedata{count = NewCount,
+			cb_state = NewCbState},
+	case {Status, StateName} of
+		{alternate_asp_active, active} ->
+			%% RFC 4666 4.3.4.3: another process of the override server
+			%% went active and the gateway took this one out, which it
+			%% says only so. This process is inactive now, as if its own
+			%% ASPIA had been acknowledged, and its user is told; it
+			%% stayed active and carried on sending, which a service
+			%% centre that steps its standby down found unsafe.
+			alternate(RCs, NextStateData);
+		_ ->
+			{next_state, StateName, NextStateData}
+	end;
 %% RFC4666, Section-4.3.4.1: "If the ASP receives an unexpected ASP Up
 %% Ack message, the ASP should consider itself in the ASP-INACTIVE state.
 %% If the ASP was not in the ASP-INACTIVE state, it SHOULD send an Error

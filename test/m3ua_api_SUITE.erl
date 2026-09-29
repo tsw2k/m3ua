@@ -108,7 +108,7 @@ all() ->
 			sgp_transfer_rc, sgp_static_register, lifecycle_contained,
 			asp_sgp_one_node, copy_messages, asp_register_down,
 			sgp_register_down, asp_request_in_place, sgp_as_pending,
-			sgp_as_pending_on_loss,
+			sgp_as_pending_on_loss, sgp_override_takeover, asp_alternate_active,
 			sgp_deregister_local, sgp_deregister_named, asp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
@@ -912,6 +912,94 @@ sgp_as_pending_on_loss(_Config) ->
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer2),
 	ok = m3ua:as_delete(RC).
+
+sgp_override_takeover() ->
+	[{userdata, [{doc, "In an override AS a second ASP going active takes the first one's place: the first is inactive and told Alternate ASP Active, and the second leaving afterwards makes the AS pending."}]}].
+
+sgp_override_takeover(_Config) ->
+	ok = application:set_env(m3ua, recovery_timer, 600),
+	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+			[{role, sgp}, {static, true}, {ip, {127,0,0,1}}]),
+	{_, server, sgp, {_, Port}} = m3ua:get_ep(EP),
+	RC = unused_rc(),
+	Name = make_ref(),
+	Keys = [{rand:uniform(16383), [], []}],
+	{ok, _} = m3ua:as_add(Name, RC, undefined, Keys, override, 1, 2),
+	Connect = fun() ->
+				{ok, P} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+				{ok, #sctp_assoc_change{state = comm_up, assoc_id = PA}} =
+						gen_sctp:connect(P, {127,0,0,1}, Port, []),
+				ok = raw_put(P, PA, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+				#m3ua{} = raw_expect(P, ?ASPSMMessage, ?ASPSMASPUPACK),
+				{P, PA}
+			end,
+	{Peer1, PeerAssoc1} = Connect(),
+	[Assoc1] = assoc(EP, 40),
+	{Peer2, PeerAssoc2} = Connect(),
+	[Assoc2] = assoc(EP, 40) -- [Assoc1],
+	ok = lists:foreach(fun(A) ->
+				{ok, RC} = m3ua:register(EP, A, RC, undefined, Keys,
+						override, Name)
+			end, [Assoc1, Assoc2]),
+	ok = raw_put(Peer1, PeerAssoc1, raw_msg(?ASPTMMessage, ?ASPTMASPAC)),
+	#m3ua{} = raw_expect(Peer1, ?ASPTMMessage, ?ASPTMASPACACK),
+	ok = as_state(RC, active, 20),
+	flush_sctp(Peer1),
+	%% The second takes over: the first is told, and is inactive.
+	ok = raw_put(Peer2, PeerAssoc2, raw_msg(?ASPTMMessage, ?ASPTMASPAC)),
+	#m3ua{} = raw_expect(Peer2, ?ASPTMMessage, ?ASPTMASPACACK),
+	#m3ua{params = Params} = raw_notify_msg(Peer1, alternate_asp_active),
+	[RC] = m3ua_codec:fetch_parameter(?RoutingContext,
+			m3ua_codec:parameters(Params)),
+	ok = wait_status(EP, Assoc1, inactive, 20),
+	active = m3ua:asp_status(EP, Assoc2),
+	[#m3ua_as{state = active, asp = Members}] = mnesia:dirty_read(m3ua_as, RC),
+	[active, inactive] = lists:sort([S || #m3ua_as_asp{state = S} <- Members]),
+	%% The second leaving is the last active one leaving: pending.
+	ok = raw_put(Peer2, PeerAssoc2, raw_msg(?ASPTMMessage, ?ASPTMASPIA)),
+	#m3ua{} = raw_expect(Peer2, ?ASPTMMessage, ?ASPTMASPIAACK),
+	ok = as_state(RC, pending, 20),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer1),
+	ok = gen_sctp:close(Peer2),
+	ok = m3ua:as_delete(RC).
+
+asp_alternate_active() ->
+	[{userdata, [{doc, "An active ASP told Alternate ASP Active by its gateway is inactive, as if its own ASPIA had been acknowledged, and asp_inactive then answers at once."}]}].
+
+asp_alternate_active(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(),
+	Self = self(),
+	spawn_link(fun() -> Self ! {up, m3ua:asp_up(EP, Assoc)} end),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUP),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUPACK)),
+	receive {up, ok} -> ok after 2000 -> ct:fail(asp_up) end,
+	spawn_link(fun() -> Self ! {active, m3ua:asp_active(EP, Assoc)} end),
+	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPAC),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPACACK)),
+	receive {active, ok} -> ok after 2000 -> ct:fail(asp_active) end,
+	P0 = m3ua_codec:add_parameter(?Status, alternate_asp_active, []),
+	P1 = m3ua_codec:add_parameter(?RoutingContext, [unused_rc()], P0),
+	ok = raw_put(Peer, PeerAssoc, m3ua_codec:m3ua(#m3ua{class = ?MGMTMessage,
+			type = ?MGMTNotify, params = P1})),
+	ok = wait_status(EP, Assoc, inactive, 20),
+	nothing_sent = raw_get(Peer),
+	{Micro, ok} = timer:tc(m3ua, asp_inactive, [EP, Assoc]),
+	true = Micro < 1000000,
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+%% @hidden
+wait_status(_EP, _Assoc, _State, 0) ->
+	{error, timeout};
+wait_status(EP, Assoc, State, N) ->
+	case m3ua:asp_status(EP, Assoc) of
+		State ->
+			ok;
+		_ ->
+			timer:sleep(50),
+			wait_status(EP, Assoc, State, N - 1)
+	end.
 
 %% @hidden
 %% 	The NTFY carrying `Status', whole.

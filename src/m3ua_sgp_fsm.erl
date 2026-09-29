@@ -727,6 +727,43 @@ handle_event(cast, {'M-SCTP_STATUS', request, Ref, From}, StateName,
 					{'M-SCTP_STATUS', confirm, Ref, {error, Reason}}),
 			{next_state, StateName, StateData}
 	end;
+handle_event(cast, {'M-DISPLACE', RC}, active,
+		#statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort,
+		ppid = Ppid, rks = RKs, cb_state = CbState, count = Count,
+		ep = EP, assoc = Assoc} = StateData) ->
+	%% Another process of an override server went active in this one's
+	%% place (state_traffic_maint2/2): tell the peer, and stop carrying
+	%% unless it still carries for another server.
+	P0 = m3ua_codec:add_parameter(?Status, alternate_asp_active, []),
+	P1 = m3ua_codec:add_parameter(?RoutingContext, [RC], P0),
+	Notify = #m3ua{class = ?MGMTMessage, type = ?MGMTNotify, params = P1},
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, m3ua_codec:m3ua(Notify)) of
+		ok ->
+			NotifyOut = maps:get(notify_out, Count, 0),
+			StateData1 = StateData#statedata{
+					count = maps:put(notify_out, NotifyOut + 1, Count)},
+			?LOG_NOTICE("ASP displaced by an alternate ASP active",
+					#{layer => m3ua, ep => EP, assoc => Assoc, rc => RC,
+					reason => alternate_asp_active}),
+			case carrying_elsewhere(RC, RKs) of
+				true ->
+					{next_state, active, StateData1};
+				false ->
+					{NewCbState, CbCount} = lifecycle(asp_inactive,
+							[CbState], StateData1),
+					report_carrying(active, inactive, EP, Assoc),
+					{next_state, inactive, StateData1#statedata{
+							cb_state = NewCbState, count = CbCount}}
+			end;
+		{error, eagain} ->
+			% @todo flow control
+			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
+		{error, Reason} ->
+			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
+	end;
+handle_event(cast, {'M-DISPLACE', _RC}, StateName, StateData) ->
+	%% Displaced after it had stopped carrying of its own accord.
+	{next_state, StateName, StateData};
 handle_event(cast, {'M-NOTIFY', AsState, RC}, StateName,
 		#statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active, ep = EP,
 		assoc = Assoc, count = Count, rks = RKs} = StateData) ->
@@ -2310,7 +2347,9 @@ state_traffic_maint1([RC | T], Event,
 				none ->
 					ok
 			end,
-			F3 = fun({Fsm, pending}) ->
+			F3 = fun({Fsm, displaced}) ->
+						ok = gen_statem:cast(Fsm, {'M-DISPLACE', RC});
+					({Fsm, pending}) ->
 						ok = gen_statem:cast(Fsm, {'M-NOTIFY', as_pending, RC});
 					({Fsm, inactive}) ->
 						ok = gen_statem:cast(Fsm, {'M-NOTIFY', as_inactive, RC});
@@ -2373,8 +2412,28 @@ state_traffic_maint2(RC, Event) ->
 							active
 					end,
 					NewAsp = Asp#m3ua_as_asp{state = AspState},
-					NewAsps = [NewAsp | RemAsp],
-					{Notify, Recovery} = case lists:foldl(Fcount, {0, 0}, NewAsps) of
+					%% RFC 4666 4.3.4.3: in override one process carries.
+					%% One going active takes the place of any that was,
+					%% which moves to inactive and is told Alternate ASP
+					%% Active. Both were left active, and DATA could go
+					%% to either: seen on NG-STP's live node on
+					%% 2026-09-29, where the one displaced then kept the
+					%% server from going pending when the other left.
+					{Rest, Displaced} = case {Event, AS#m3ua_as.rk} of
+						{asp_active, {_, _, override}} ->
+							lists:mapfoldl(fun
+										(#m3ua_as_asp{state = active,
+												fsm = F} = A, D) ->
+											{A#m3ua_as_asp{state = inactive},
+													[{F, displaced} | D]};
+										(A, D) ->
+											{A, D}
+									end, [], RemAsp);
+						_ ->
+							{RemAsp, []}
+					end,
+					NewAsps = [NewAsp | Rest],
+					{Notify0, Recovery} = case lists:foldl(Fcount, {0, 0}, NewAsps) of
 						%% AC2PN (RFC 4666 4.3.2): the last active process
 						%% gone, the server waits T(r) for another before
 						%% it is inactive or down, and the processes still
@@ -2426,9 +2485,25 @@ state_traffic_maint2(RC, Event) ->
 							mnesia:write(NewAS),
 							{[], none}
 					end,
-					{Notify, Recovery};
+					{Displaced ++ Notify0, Recovery};
 				false ->
 					{[], none}
 			end
 	end.
 
+%% @hidden
+%% 	Whether this process is still active in a server other than `RC'.
+carrying_elsewhere(RC, RKs) ->
+	Fsm = self(),
+	lists:any(fun({RC1, _, _}) when RC1 =/= RC ->
+				case catch mnesia:dirty_read(m3ua_as, RC1) of
+					[#m3ua_as{asp = ASPs}] ->
+						lists:any(fun(#m3ua_as_asp{fsm = F, state = S}) ->
+									F == Fsm andalso S == active
+								end, ASPs);
+					_ ->
+						false
+				end;
+			(_) ->
+				false
+			end, RKs).
