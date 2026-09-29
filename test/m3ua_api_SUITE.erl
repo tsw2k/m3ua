@@ -104,7 +104,7 @@ all() ->
 			asp_drst_dupu, asp_restricted_congestion,
 			undecodable, unexpected, registration_results, ack_timeout,
 			inactive_timeout, sgp_undecodable, sgp_unexpected,
-			sgp_asp_up_inactive, sgp_aspia_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
+			sgp_asp_up_inactive, sgp_aspia_inactive, sgp_asptm_rc, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
 			sgp_transfer_rc, sgp_static_register, lifecycle_contained,
 			asp_sgp_one_node, copy_messages, asp_register_down,
 			sgp_register_down, asp_request_in_place, sgp_as_pending,
@@ -461,6 +461,7 @@ sgp_aspia_inactive() ->
 	[{userdata, [{doc, "An ASPIA at an inactive asp is acknowledged, not answered with an ERR, and changes nothing (RFC 4666 4.3.4.4)."}]}].
 
 sgp_aspia_inactive(_Config) ->
+	RC = configured_as(),
 	{Peer, PeerAssoc, EP, Assoc} = raw_asp(),
 	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
 	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
@@ -475,12 +476,64 @@ sgp_aspia_inactive(_Config) ->
 	#{inactive_in := 1, inactive_ack_out := 1} = Counts,
 	false = maps:is_key(error_out, Counts),
 	ok = m3ua:stop(EP),
-	ok = gen_sctp:close(Peer).
+	ok = gen_sctp:close(Peer),
+	ok = m3ua:as_delete(RC).
+
+sgp_asptm_rc() ->
+	[{userdata, [{doc, "An ASPAC or ASPIA naming a routing context not defined here is answered with an ERR naming it, and changes nothing (RFC 4666 4.3.4.3, 4.3.4.4)."}]}].
+
+sgp_asptm_rc(_Config) ->
+	RC = configured_as(),
+	Bogus = unused_rc(),
+	{Peer, PeerAssoc, EP, Assoc} = raw_asp(),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
+	Named = fun(Type, RCs) ->
+			m3ua_codec:m3ua(#m3ua{class = ?ASPTMMessage, type = Type,
+					params = m3ua_codec:parameters([{?RoutingContext, RCs}])})
+	end,
+	Error = fun() ->
+			#m3ua{class = ?MGMTMessage, type = ?MGMTError,
+					params = Params} = raw_expect(Peer, ?MGMTMessage, ?MGMTError),
+			Parameters = m3ua_codec:parameters(Params),
+			{m3ua_codec:fetch_parameter(?ErrorCode, Parameters),
+					m3ua_codec:get_parameter(?RoutingContext, Parameters, [])}
+	end,
+	%% ASPAC for a context nobody defined: refused, still inactive.
+	ok = raw_put(Peer, PeerAssoc, Named(?ASPTMASPAC, [Bogus])),
+	{no_configured_as_for_asp, [Bogus]} = Error(),
+	inactive = m3ua:asp_status(EP, Assoc),
+	%% One naming it among one that is defined: refused whole.
+	ok = raw_put(Peer, PeerAssoc, Named(?ASPTMASPAC, [RC, Bogus])),
+	{no_configured_as_for_asp, [Bogus]} = Error(),
+	inactive = m3ua:asp_status(EP, Assoc),
+	%% ASPIA for it: Invalid Routing Context.
+	ok = raw_put(Peer, PeerAssoc, Named(?ASPTMASPIA, [Bogus])),
+	{invalid_routing_context, [Bogus]} = Error(),
+	%% The defined one alone is taken.
+	ok = raw_put(Peer, PeerAssoc, Named(?ASPTMASPAC, [RC])),
+	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPACACK),
+	active = m3ua:asp_status(EP, Assoc),
+	{ok, #{asptm_refused := 3}} = m3ua:getcount(EP, Assoc),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer),
+	ok = m3ua:as_delete(RC).
+
+%% @hidden
+%% 	An application server configured for a case to have one defined:
+%% 	an ASPAC or ASPIA naming no routing context is refused where there
+%% 	is none at all.
+configured_as() ->
+	RC = unused_rc(),
+	Keys = [{rand:uniform(16383), [], []}],
+	{ok, _} = m3ua:as_add(make_ref(), RC, undefined, Keys, loadshare, 1, 1),
+	RC.
 
 sgp_asp_up_active() ->
 	[{userdata, [{doc, "An ASP UP at an active asp is acknowledged, answered with an ERR, and leaves the asp inactive (RFC 4666 4.3.4.1)."}]}].
 
 sgp_asp_up_active(_Config) ->
+	RC = configured_as(),
 	{Peer, PeerAssoc, EP, Assoc} = raw_asp(),
 	AspUp = m3ua_codec:m3ua(#m3ua{class = ?ASPSMMessage,
 			type = ?ASPSMASPUP, params = <<>>}),
@@ -503,7 +556,8 @@ sgp_asp_up_active(_Config) ->
 	{ok, #{up_in := 2, up_ack_out := 2, error_out := 1}}
 			= m3ua:getcount(EP, Assoc),
 	ok = m3ua:stop(EP),
-	ok = gen_sctp:close(Peer).
+	ok = gen_sctp:close(Peer),
+	ok = m3ua:as_delete(RC).
 
 sgp_deregister() ->
 	[{userdata, [{doc, "ASP DOWN, and ASP UP at an active asp, deregister the routing keys the asp registered (RFC 4666 4.3.4)."}]}].
@@ -610,17 +664,19 @@ sgp_static_register(_Config) ->
 	{ok, #sctp_assoc_change{state = comm_up, assoc_id = PeerAssoc}} =
 			gen_sctp:connect(Peer, {127,0,0,1}, Port, []),
 	[Assoc] = assoc(EP, 40),
+	%% Configured before, so that an ASPAC naming no routing context is
+	%% taken (RFC 4666 4.3.4.3).
+	RC = unused_rc(),
+	Name = make_ref(),
+	Keys = [{rand:uniform(16383), [], []}],
+	{ok, _} = m3ua:as_add(Name, RC, undefined, Keys, loadshare, 1, 1),
 	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
 	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
 	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPAC)),
 	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPACACK),
 	active = m3ua:asp_status(EP, Assoc),
-	%% Configured, and joined only now, the way a gateway learns of a
-	%% peer with a static key: after it has gone active.
-	RC = unused_rc(),
-	Name = make_ref(),
-	Keys = [{rand:uniform(16383), [], []}],
-	{ok, _} = m3ua:as_add(Name, RC, undefined, Keys, loadshare, 1, 1),
+	%% Joined only now, the way a gateway learns of a peer with a static
+	%% key: after it has gone active.
 	{ok, RC} = m3ua:register(EP, Assoc, RC, undefined, Keys, loadshare, Name),
 	[#m3ua_as{state = active, asp = [#m3ua_as_asp{state = active}]}] =
 			mnesia:dirty_read(m3ua_as, RC),

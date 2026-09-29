@@ -1313,32 +1313,35 @@ handle_sgp(#m3ua{class = ?RKMMessage, type = ?RKMDEREGREQ, params = Params},
 	Parameters = m3ua_codec:parameters(Params),
 	RCs = m3ua_codec:fetch_parameter(?RoutingContext, Parameters),
 	dereg_request(RCs, StateName, StateData);
-handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC, params = Params},
-		inactive, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active,
-		assoc = Assoc, ep = EP, cb_state = CbState} = StateData) ->
-	AspActive = m3ua_codec:parameters(Params),
-	RCs = m3ua_codec:get_parameter(?RoutingContext, AspActive, undefined),
-	AspActiveAck = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPACACK},
-	Packet = m3ua_codec:m3ua(AspActiveAck),
-	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
-		ok ->
-			NewStateData = state_traffic_maint(RCs, asp_active, StateData),
-			CbArgs = [CbState],
-			{NewCbState, CbCount} = lifecycle(asp_active, CbArgs, StateData),
-			ok = m3ua_receiver:replenish(Receiver, Active),
-			ActiveIn = maps:get(active_in, CbCount, 0),
-			ActiveAckOut = maps:get(active_ack_out, CbCount, 0),
-			NewCount = maps:put(active_in, ActiveIn + 1, CbCount),
-			NextCount = maps:put(active_ack_out, ActiveAckOut + 1, NewCount),
-			NextStateData = NewStateData#statedata{cb_state = NewCbState,
-					count = NextCount},
-			report_carrying(inactive, active, EP, Assoc),
-			{next_state, active, NextStateData};
-		{error, eagain} ->
-			% @todo flow control
-			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
-		{error, Reason} ->
-			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
+%% RFC4666, Sections 4.3.4.3 and 4.3.4.4: an ASP Active or ASP Inactive
+%% naming a routing context that is not defined, by configuration or
+%% registration, is answered with an ERR -- "No configured AS for ASP"
+%% for ASPAC, "Invalid Routing Context" for ASPIA -- naming the contexts
+%% that are not, and changes nothing; one naming none is refused only
+%% where there is no application server here at all. These used to be
+%% acknowledged whatever they named. A message naming some contexts
+%% that are defined and some that are not is refused whole.
+handle_sgp(#m3ua{class = ?ASPTMMessage, type = Type, params = Params} = M3UA,
+		StateName, Stream, #statedata{rks = RKs} = StateData)
+		when (Type == ?ASPTMASPAC andalso StateName == inactive)
+		orelse (Type == ?ASPTMASPIA andalso
+		(StateName == active orelse StateName == inactive)) ->
+	Parameters = m3ua_codec:parameters(Params),
+	RCs = m3ua_codec:get_parameter(?RoutingContext, Parameters, undefined),
+	Undefined = case Type of
+		?ASPTMASPAC ->
+			no_configured_as_for_asp;
+		?ASPTMASPIA ->
+			invalid_routing_context
+	end,
+	case undefined_rcs(RCs, RKs) of
+		[] ->
+			handle_asptm(M3UA, StateName, Stream, StateData);
+		none ->
+			refuse_asptm(Type, no_configured_as_for_asp, [], StateName,
+					StateData);
+		Unknown ->
+			refuse_asptm(Type, Undefined, Unknown, StateName, StateData)
 	end;
 handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN, params = Params},
 		StateName, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active,
@@ -1364,63 +1367,6 @@ handle_sgp(#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN, params = Params},
 					count = NextCount},
 			report_carrying(StateName, down, EP, Assoc),
 			{next_state, down, NextStateData};
-		{error, eagain} ->
-			% @todo flow control
-			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
-		{error, Reason} ->
-			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
-	end;
-handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIA, params = Params},
-		active, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active,
-		assoc = Assoc, ep = EP, cb_state = CbState} = StateData) ->
-	AspInActive = m3ua_codec:parameters(Params),
-	RCs = m3ua_codec:get_parameter(?RoutingContext, AspInActive, undefined),
-	AspInActiveAck = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIAACK},
-	Packet = m3ua_codec:m3ua(AspInActiveAck),
-	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
-		ok ->
-			NewStateData = state_traffic_maint(RCs, asp_inactive, StateData),
-			CbArgs = [CbState],
-			{NewCbState, CbCount} = lifecycle(asp_inactive, CbArgs, StateData),
-			ok = m3ua_receiver:replenish(Receiver, Active),
-			InactiveIn = maps:get(inactive_in, CbCount, 0),
-			InactiveAckOut = maps:get(inactive_ack_out, CbCount, 0),
-			NewCount = maps:put(inactive_in, InactiveIn + 1, CbCount),
-			NextCount = maps:put(inactive_ack_out, InactiveAckOut + 1, NewCount),
-			NextStateData = NewStateData#statedata{cb_state = NewCbState,
-					count = NextCount},
-			report_carrying(active, inactive, EP, Assoc),
-			{next_state, inactive, NextStateData};
-		{error, eagain} ->
-			% @todo flow control
-			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
-		{error, Reason} ->
-			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
-	end;
-%% RFC4666, Section-4.3.4.4: "An ASP Inactive message MUST always be
-%% responded to by the peer", with an ASP Inactive Ack where the routing
-%% key is defined -- the asp already inactive included. Most often it
-%% is an asp this gateway displaced in an override application server
-%% (4.3.4.3), whose ASPIA crossed the NTFY Alternate ASP Active; it used
-%% to get an ERR, Unexpected Message, and take itself to be active
-%% still. Nothing changes here: the asp is where it asked to be.
-handle_sgp(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIA},
-		inactive, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr,
-		peer_port = PeerPort, ppid = Ppid, receiver = Receiver,
-		active = Active, assoc = Assoc, ep = EP, count = Count} = StateData) ->
-	?LOG_DEBUG("ASPIA acknowledged again",
-			#{layer => m3ua, ep => EP, assoc => Assoc,
-			reason => already_inactive}),
-	AspInActiveAck = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIAACK},
-	Packet = m3ua_codec:m3ua(AspInActiveAck),
-	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
-		ok ->
-			ok = m3ua_receiver:replenish(Receiver, Active),
-			InactiveIn = maps:get(inactive_in, Count, 0),
-			InactiveAckOut = maps:get(inactive_ack_out, Count, 0),
-			NewCount = maps:put(inactive_in, InactiveIn + 1, Count),
-			NextCount = maps:put(inactive_ack_out, InactiveAckOut + 1, NewCount),
-			{next_state, inactive, StateData#statedata{count = NextCount}};
 		{error, eagain} ->
 			% @todo flow control
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
@@ -1533,6 +1479,132 @@ handle_sgp(#m3ua{} = M3UA, StateName, Stream, StateData) ->
 	unexpected(M3UA, StateName, Stream, StateData).
 
 %% @hidden
+%% 	ASPAC and ASPIA once their routing contexts are known to be defined.
+handle_asptm(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC, params = Params},
+		inactive, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active,
+		assoc = Assoc, ep = EP, cb_state = CbState} = StateData) ->
+	AspActive = m3ua_codec:parameters(Params),
+	RCs = m3ua_codec:get_parameter(?RoutingContext, AspActive, undefined),
+	AspActiveAck = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPACACK},
+	Packet = m3ua_codec:m3ua(AspActiveAck),
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+		ok ->
+			NewStateData = state_traffic_maint(RCs, asp_active, StateData),
+			CbArgs = [CbState],
+			{NewCbState, CbCount} = lifecycle(asp_active, CbArgs, StateData),
+			ok = m3ua_receiver:replenish(Receiver, Active),
+			ActiveIn = maps:get(active_in, CbCount, 0),
+			ActiveAckOut = maps:get(active_ack_out, CbCount, 0),
+			NewCount = maps:put(active_in, ActiveIn + 1, CbCount),
+			NextCount = maps:put(active_ack_out, ActiveAckOut + 1, NewCount),
+			NextStateData = NewStateData#statedata{cb_state = NewCbState,
+					count = NextCount},
+			report_carrying(inactive, active, EP, Assoc),
+			{next_state, active, NextStateData};
+		{error, eagain} ->
+			% @todo flow control
+			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
+		{error, Reason} ->
+			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
+	end;
+handle_asptm(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIA, params = Params},
+		active, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, receiver = Receiver, active = Active,
+		assoc = Assoc, ep = EP, cb_state = CbState} = StateData) ->
+	AspInActive = m3ua_codec:parameters(Params),
+	RCs = m3ua_codec:get_parameter(?RoutingContext, AspInActive, undefined),
+	AspInActiveAck = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIAACK},
+	Packet = m3ua_codec:m3ua(AspInActiveAck),
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+		ok ->
+			NewStateData = state_traffic_maint(RCs, asp_inactive, StateData),
+			CbArgs = [CbState],
+			{NewCbState, CbCount} = lifecycle(asp_inactive, CbArgs, StateData),
+			ok = m3ua_receiver:replenish(Receiver, Active),
+			InactiveIn = maps:get(inactive_in, CbCount, 0),
+			InactiveAckOut = maps:get(inactive_ack_out, CbCount, 0),
+			NewCount = maps:put(inactive_in, InactiveIn + 1, CbCount),
+			NextCount = maps:put(inactive_ack_out, InactiveAckOut + 1, NewCount),
+			NextStateData = NewStateData#statedata{cb_state = NewCbState,
+					count = NextCount},
+			report_carrying(active, inactive, EP, Assoc),
+			{next_state, inactive, NextStateData};
+		{error, eagain} ->
+			% @todo flow control
+			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
+		{error, Reason} ->
+			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
+	end;
+%% RFC4666, Section-4.3.4.4: "An ASP Inactive message MUST always be
+%% responded to by the peer", with an ASP Inactive Ack where the routing
+%% key is defined -- the asp already inactive included. Most often it
+%% is an asp this gateway displaced in an override application server
+%% (4.3.4.3), whose ASPIA crossed the NTFY Alternate ASP Active; it used
+%% to get an ERR, Unexpected Message, and take itself to be active
+%% still. Nothing changes here: the asp is where it asked to be.
+handle_asptm(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIA},
+		inactive, _Stream, #statedata{socket = Socket, peer_addr = PeerAddr,
+		peer_port = PeerPort, ppid = Ppid, receiver = Receiver,
+		active = Active, assoc = Assoc, ep = EP, count = Count} = StateData) ->
+	?LOG_DEBUG("ASPIA acknowledged again",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			reason => already_inactive}),
+	AspInActiveAck = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIAACK},
+	Packet = m3ua_codec:m3ua(AspInActiveAck),
+	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
+		ok ->
+			ok = m3ua_receiver:replenish(Receiver, Active),
+			InactiveIn = maps:get(inactive_in, Count, 0),
+			InactiveAckOut = maps:get(inactive_ack_out, Count, 0),
+			NewCount = maps:put(inactive_in, InactiveIn + 1, Count),
+			NextCount = maps:put(inactive_ack_out, InactiveAckOut + 1, NewCount),
+			{next_state, inactive, StateData#statedata{count = NextCount}};
+		{error, eagain} ->
+			% @todo flow control
+			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
+		{error, Reason} ->
+			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
+	end.
+
+%% @hidden
+%% 	The routing contexts named that are not defined here, by
+%% 	configuration or registration: [] where all are, and `none' where
+%% 	none is named and this process has no routing key, nor is any
+%% 	application server configured here.
+undefined_rcs(undefined, []) ->
+	try mnesia:table_info(m3ua_as, size) of
+		0 ->
+			none;
+		_ ->
+			[]
+	catch
+		exit:_ ->
+			none
+	end;
+undefined_rcs(undefined, _RKs) ->
+	[];
+undefined_rcs(RCs, _RKs) when is_list(RCs) ->
+	[RC || RC <- RCs, mnesia:dirty_read(m3ua_as, RC) == []].
+
+%% @hidden
+%% 	Answer an ASPAC or ASPIA with an ERR naming the routing contexts
+%% 	that are not defined, and leave the asp as it was.
+refuse_asptm(Type, ErrorCode, RCs, StateName,
+		#statedata{ep = EP, assoc = Assoc, count = Count} = StateData) ->
+	Message = case Type of
+		?ASPTMASPAC ->
+			aspac;
+		?ASPTMASPIA ->
+			aspia
+	end,
+	?LOG_NOTICE("ASP traffic maintenance refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc, state => StateName,
+			message => Message, rcs => RCs, reason => ErrorCode}),
+	Refused = maps:get(asptm_refused, Count, 0),
+	NewCount = maps:put(asptm_refused, Refused + 1, Count),
+	send_error(ErrorCode, RCs, StateName,
+			StateData#statedata{count = NewCount}).
+
+%% @hidden
 %% 	Discard a message that will not decode, and answer it with an
 %% 	ERR -- unless it was itself an ERR, which is never answered.
 undecodable(Packet, Reason, StateName, Stream,
@@ -1569,12 +1641,22 @@ unexpected(#m3ua{class = Class, type = Type}, StateName, Stream,
 			StateData#statedata{count = NewCount}).
 
 %% @hidden
-send_error(ErrorCode, StateName,
+send_error(ErrorCode, StateName, StateData) ->
+	send_error(ErrorCode, [], StateName, StateData).
+%% @hidden
+%% 	The same, naming the routing contexts the error is about.
+send_error(ErrorCode, RCs, StateName,
 		#statedata{socket = Socket, peer_addr = PeerAddr, peer_port = PeerPort,
 		ppid = Ppid, receiver = Receiver, active = Active,
 		ep = EP, assoc = Assoc, count = Count} = StateData) ->
 	P0 = m3ua_codec:add_parameter(?ErrorCode, ErrorCode, []),
-	ErrorParams = m3ua_codec:parameters(P0),
+	P1 = case RCs of
+		[] ->
+			P0;
+		_ ->
+			m3ua_codec:add_parameter(?RoutingContext, RCs, P0)
+	end,
+	ErrorParams = m3ua_codec:parameters(P1),
 	ErrorMsg = #m3ua{class = ?MGMTMessage,
 			type = ?MGMTError, params = ErrorParams},
 	Packet = m3ua_codec:m3ua(ErrorMsg),
