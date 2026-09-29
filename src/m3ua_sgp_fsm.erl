@@ -1485,7 +1485,24 @@ handle_asptm(#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC, params = Params},
 		assoc = Assoc, ep = EP, cb_state = CbState} = StateData) ->
 	AspActive = m3ua_codec:parameters(Params),
 	RCs = m3ua_codec:get_parameter(?RoutingContext, AspActive, undefined),
-	AspActiveAck = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPACACK},
+	%% RFC4666, Section-4.3.4.3: the ACK reflects any Traffic Mode Type
+	%% the ASPAC had, and MUST name its routing contexts where it named
+	%% any. It used to carry neither.
+	Tmt = case m3ua_codec:get_parameter(?TrafficModeType, AspActive,
+			undefined) of
+		undefined ->
+			[];
+		Mode ->
+			[{?TrafficModeType, Mode}]
+	end,
+	Rc = case RCs of
+		undefined ->
+			[];
+		_ ->
+			[{?RoutingContext, RCs}]
+	end,
+	AspActiveAck = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPACACK,
+			params = m3ua_codec:parameters(Tmt ++ Rc)},
 	Packet = m3ua_codec:m3ua(AspActiveAck),
 	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
 		ok ->

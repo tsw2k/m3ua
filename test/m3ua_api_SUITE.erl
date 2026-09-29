@@ -510,9 +510,11 @@ sgp_asptm_rc(_Config) ->
 	%% ASPIA for it: Invalid Routing Context.
 	ok = raw_put(Peer, PeerAssoc, Named(?ASPTMASPIA, [Bogus])),
 	{invalid_routing_context, [Bogus]} = Error(),
-	%% The defined one alone is taken.
+	%% The defined one alone is taken, and the ACK names it (4.3.4.3).
 	ok = raw_put(Peer, PeerAssoc, Named(?ASPTMASPAC, [RC])),
-	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPACACK),
+	#m3ua{params = AckParams} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPACACK),
+	[RC] = m3ua_codec:get_parameter(?RoutingContext,
+			m3ua_codec:parameters(AckParams), undefined),
 	active = m3ua:asp_status(EP, Assoc),
 	{ok, #{asptm_refused := 3}} = m3ua:getcount(EP, Assoc),
 	ok = m3ua:stop(EP),
