@@ -613,12 +613,23 @@ handle_cast({'T(r)', start, RC}, #state{recovery = Recovery} = State) ->
 		error ->
 			ok
 	end,
-	Tr = application:get_env(m3ua, recovery_timer, ?RECOVERY_TIMER),
+	Tr = recovery_timer(),
 	TRef = erlang:start_timer(Tr, self(), {'T(r)', RC}),
 	?LOG_NOTICE("Application server pending",
 			#{layer => m3ua, rc => RC, timer => Tr,
 			reason => no_active_asp}),
-	{noreply, State#state{recovery = Recovery#{RC => TRef}}};
+	started(State#state{recovery = Recovery#{RC => TRef}});
+handle_cast({'T(r)', stop, RC}, #state{recovery = Recovery} = State) ->
+	%% PN2AC. The timer is cancelled and forgotten here, so that one
+	%% that ran out meanwhile, its message already queued, finds nothing
+	%% of its own and does not end a later pending episode early.
+	case maps:take(RC, Recovery) of
+		{TRef, Recovery1} ->
+			_ = erlang:cancel_timer(TRef),
+			started(State#state{recovery = Recovery1});
+		error ->
+			started(State)
+	end;
 handle_cast(Request, State) ->
 	stray(cast, Request, undefined),
 	{noreply, State}.
@@ -633,7 +644,7 @@ handle_cast(Request, State) ->
 %%
 handle_info(timeout, #state{ep_sup_sup = undefined} = State) ->
 	NewState = get_sups(State),
-	{noreply, NewState};
+	{noreply, rearm(NewState)};
 handle_info({'EXIT', EP, {shutdown, {EP, _Reason}}},
 		#state{eps = EPs} = State) ->
 	NewEPs = gb_trees:delete(EP, EPs),
@@ -852,4 +863,49 @@ recovered(RC) ->
 					#{layer => m3ua, rc => RC, event => 'T(r)',
 					reason => Reason}),
 			ok
+	end.
+
+%% @hidden
+%% 	Layer management started again with servers still pending: their
+%% 	T(r) went with the old process, and the state machines that wrote
+%% 	them pending will not start it again. Each gets a whole T(r) of
+%% 	its own from now, which errs on the side of waiting.
+rearm(#state{recovery = Recovery} = State) ->
+	Pending = try mnesia:dirty_select(m3ua_as, [{'$1',
+			[{'==', {element, #m3ua_as.state, '$1'}, pending}], ['$1']}])
+	catch
+		_:_ ->
+			[]
+	end,
+	Tr = recovery_timer(),
+	Recovery1 = lists:foldl(fun(#m3ua_as{rc = RC}, Acc) ->
+				case maps:is_key(RC, Acc) of
+					true ->
+						Acc;
+					false ->
+						?LOG_NOTICE("Application server pending, T(r) started "
+								"again", #{layer => m3ua, rc => RC,
+								timer => Tr, reason => lm_restarted}),
+						Acc#{RC => erlang:start_timer(Tr, self(),
+								{'T(r)', RC})}
+				end
+			end, Recovery, Pending),
+	State#state{recovery = Recovery1}.
+
+%% @hidden
+%% 	A cast that arrives before init/1's zero timeout cancels it, and
+%% 	the endpoints' supervisors were then not looked up until the next
+%% 	call; asked for again here.
+started(#state{ep_sup_sup = undefined} = State) ->
+	{noreply, State, 0};
+started(State) ->
+	{noreply, State}.
+
+%% @hidden
+recovery_timer() ->
+	case application:get_env(m3ua, recovery_timer) of
+		{ok, Tr} when is_integer(Tr), Tr >= 0 ->
+			Tr;
+		_ ->
+			?RECOVERY_TIMER
 	end.

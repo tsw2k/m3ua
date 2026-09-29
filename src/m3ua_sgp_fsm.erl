@@ -732,7 +732,10 @@ handle_event(cast, {'M-NOTIFY', AsState, RC}, StateName,
 		assoc = Assoc, count = Count, rks = RKs} = StateData) ->
 	NewRKs = update_rks(RC, undefined, AsState, RKs),
 	NewStateData = StateData#statedata{rks = NewRKs},
-	Params = m3ua_codec:store_parameter(?Status, AsState, []),
+	%% With the routing context, as send_notify/3 has it: a process in
+	%% more than one server cannot otherwise tell which is pending.
+	Params = m3ua_codec:add_parameter(?RoutingContext, [RC],
+			m3ua_codec:add_parameter(?Status, AsState, [])),
 	Notify = #m3ua{class = ?MGMTMessage, type = ?MGMTNotify, params = Params},
 	Packet = m3ua_codec:m3ua(Notify),
 	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Packet) of
@@ -908,6 +911,13 @@ terminate(Reason, StateName, #statedata{socket = Socket} = StateData) ->
 	end,
 	terminate1(Reason, StateName, StateData).
 %% @hidden
+terminate1(Reason, StateName, StateData0) when StateName /= down ->
+	%% Ending as an association is lost is ASPDN for the server: taken
+	%% out of it, it has to be counted out first, or a server whose one
+	%% active process this was stays active with none, never pending and
+	%% nobody told -- the commonest failover there is.
+	StateData = state_traffic_maint(undefined, asp_down, StateData0),
+	terminate1(Reason, down, StateData);
 terminate1(Reason, _StateName, #statedata{rks = RKs, registered = Registered,
 		ep = EP, assoc = Assoc} = StateData) ->
 	Fsm = self(),
@@ -1667,8 +1677,14 @@ reg_request1(undefined, RK, LrkId) ->
 					{not_reg, AsState, RegRes};
 				false ->
 					NewSGPs = [#m3ua_as_asp{fsm = SGP, state = inactive} | SGPs],
+					%% A server active or pending keeps its state: a process
+					%% registering while the server waits T(r) is the
+					%% standby it waits for, and lowering it to inactive
+					%% here ended the wait with nobody told.
 					NewAS = case AsState of
 						active ->
+							AS#m3ua_as{asp = NewSGPs};
+						pending ->
 							AS#m3ua_as{asp = NewSGPs};
 						_ ->
 							AS#m3ua_as{asp = NewSGPs, state = inactive}
@@ -2289,6 +2305,8 @@ state_traffic_maint1([RC | T], Event,
 			case Recovery of
 				start ->
 					gen_server:cast(m3ua, {'T(r)', start, RC});
+				stop ->
+					gen_server:cast(m3ua, {'T(r)', stop, RC});
 				none ->
 					ok
 			end,
@@ -2376,7 +2394,7 @@ state_traffic_maint2(RC, Event) ->
 						{NumActive, _} when AsState == pending, NumActive > 0 ->
 							NewAS = AS#m3ua_as{state = active, asp = NewAsps},
 							mnesia:write(NewAS),
-							{lists:foldl(Factive, [], NewAsps), none};
+							{lists:foldl(Factive, [], NewAsps), stop};
 						{0, 0} when AsState == down ->
 							NewAS = AS#m3ua_as{state = down, asp = NewAsps},
 							mnesia:write(NewAS),

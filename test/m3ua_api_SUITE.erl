@@ -83,6 +83,7 @@ init_per_testcase(_TestCase, Config) ->
 %% Cleanup after each test case.
 %%
 end_per_testcase(_TestCase, _Config) ->
+	_ = application:unset_env(m3ua, recovery_timer),
 	ok.
 
 -spec sequences() -> Sequences :: [{SeqName :: atom(), Testcases :: [atom()]}].
@@ -107,6 +108,7 @@ all() ->
 			sgp_transfer_rc, sgp_static_register, lifecycle_contained,
 			asp_sgp_one_node, copy_messages, asp_register_down,
 			sgp_register_down, asp_request_in_place, sgp_as_pending,
+			sgp_as_pending_on_loss,
 			sgp_deregister_local, sgp_deregister_named, asp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
@@ -870,6 +872,64 @@ sgp_as_pending(_Config) ->
 	ok = gen_sctp:close(Peer1),
 	ok = gen_sctp:close(Peer2),
 	ok = m3ua:as_delete(RC).
+
+sgp_as_pending_on_loss() ->
+	[{userdata, [{doc, "The active ASP's association lost is the same as its ASPDN: the AS is pending for T(r) and the standby is told, naming the AS by its routing context."}]}].
+
+sgp_as_pending_on_loss(_Config) ->
+	ok = application:set_env(m3ua, recovery_timer, 600),
+	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+			[{role, sgp}, {static, true}, {ip, {127,0,0,1}}]),
+	{_, server, sgp, {_, Port}} = m3ua:get_ep(EP),
+	RC = unused_rc(),
+	Name = make_ref(),
+	Keys = [{rand:uniform(16383), [], []}],
+	{ok, _} = m3ua:as_add(Name, RC, undefined, Keys, override, 1, 2),
+	Connect = fun() ->
+				{ok, P} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+				{ok, #sctp_assoc_change{state = comm_up, assoc_id = PA}} =
+						gen_sctp:connect(P, {127,0,0,1}, Port, []),
+				ok = raw_put(P, PA, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
+				#m3ua{} = raw_expect(P, ?ASPSMMessage, ?ASPSMASPUPACK),
+				{P, PA}
+			end,
+	{Peer1, PeerAssoc1} = Connect(),
+	{Peer2, _PeerAssoc2} = Connect(),
+	ok = lists:foreach(fun(A) ->
+				{ok, RC} = m3ua:register(EP, A, RC, undefined, Keys,
+						override, Name)
+			end, assoc(EP, 40)),
+	ok = raw_put(Peer1, PeerAssoc1, raw_msg(?ASPTMMessage, ?ASPTMASPAC)),
+	#m3ua{} = raw_expect(Peer1, ?ASPTMMessage, ?ASPTMASPACACK),
+	ok = as_state(RC, active, 20),
+	flush_sctp(Peer2),
+	ok = gen_sctp:close(Peer1),
+	ok = as_state(RC, pending, 20),
+	#m3ua{params = Params} = raw_notify_msg(Peer2, as_pending),
+	Parameters = m3ua_codec:parameters(Params),
+	[RC] = m3ua_codec:fetch_parameter(?RoutingContext, Parameters),
+	ok = as_state(RC, inactive, 40),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer2),
+	ok = m3ua:as_delete(RC).
+
+%% @hidden
+%% 	The NTFY carrying `Status', whole.
+raw_notify_msg(Peer, Status) ->
+	case raw_get(Peer) of
+		#m3ua{class = ?MGMTMessage, type = ?MGMTNotify, params = Params} = M ->
+			case m3ua_codec:fetch_parameter(?Status,
+					m3ua_codec:parameters(Params)) of
+				Status ->
+					M;
+				_Other ->
+					raw_notify_msg(Peer, Status)
+			end;
+		nothing_sent ->
+			nothing_sent;
+		_Other ->
+			raw_notify_msg(Peer, Status)
+	end.
 
 %% @hidden
 %% 	Wait for an application server to reach a state, 50 ms at a time.
