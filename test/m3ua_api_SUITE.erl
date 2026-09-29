@@ -106,7 +106,7 @@ all() ->
 			sgp_asp_up_inactive, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
 			sgp_transfer_rc, sgp_static_register, lifecycle_contained,
 			asp_sgp_one_node, copy_messages, asp_register_down,
-			sgp_register_down,
+			sgp_register_down, asp_request_in_place,
 			sgp_deregister_local, sgp_deregister_named, asp_deregister,
 			getstat_ep, getstat_assoc,
 			getcount, asp_up, asp_down, register, asp_active,
@@ -784,6 +784,36 @@ sgp_register_down(_Config) ->
 	true = Micro2 < 1000000,
 	ok = m3ua:stop(EP2),
 	ok = gen_sctp:close(Peer2).
+
+asp_request_in_place() ->
+	[{userdata, [{doc, "Asked for the state it is already in, an ASP answers at once and sends nothing."}]}].
+
+asp_request_in_place(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(),
+	{Micro0, ok} = timer:tc(m3ua, asp_down, [EP, Assoc]),
+	true = Micro0 < 1000000,
+	nothing_sent = raw_get(Peer),
+	{error, asp_down} = m3ua:asp_active(EP, Assoc),
+	Self = self(),
+	spawn_link(fun() -> Self ! {up, m3ua:asp_up(EP, Assoc)} end),
+	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUP),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUPACK)),
+	receive {up, ok} -> ok after 2000 -> ct:fail(asp_up) end,
+	{_, ok} = timer:tc(m3ua, asp_up, [EP, Assoc]),
+	{_, ok} = timer:tc(m3ua, asp_inactive, [EP, Assoc]),
+	nothing_sent = raw_get(Peer),
+	spawn_link(fun() -> Self ! {active, m3ua:asp_active(EP, Assoc)} end),
+	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPAC),
+	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPACACK)),
+	receive {active, ok} -> ok after 2000 -> ct:fail(asp_active) end,
+	active = m3ua:asp_status(EP, Assoc),
+	%% The live node's case: asp_active again never answered.
+	{Micro, ok} = timer:tc(m3ua, asp_active, [EP, Assoc]),
+	true = Micro < 1000000,
+	{_, ok} = timer:tc(m3ua, asp_up, [EP, Assoc]),
+	nothing_sent = raw_get(Peer),
+	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
 
 %% @hidden
 %% 	Wait for an application server to reach a state, 50 ms at a time.

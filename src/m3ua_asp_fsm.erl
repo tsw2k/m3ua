@@ -630,6 +630,18 @@ down({call, From}, {'MTP-TRANSFER', request, _Params},
 	NewCount = maps:put(transfer_discarded, Discarded + 1, Count),
 	{next_state, down, StateData#statedata{count = NewCount},
 			{reply, From, {error, unexpected_message}}};
+down(cast, {AspOp, request, Ref, From},
+		#statedata{req = undefined} = StateData)
+		when AspOp == 'M-ASP_DOWN' ->
+	already(AspOp, Ref, From, down, StateData);
+down(cast, {AspOp, request, Ref, From},
+		#statedata{req = undefined, ep = EP, assoc = Assoc} = StateData)
+		when AspOp == 'M-ASP_ACTIVE'; AspOp == 'M-ASP_INACTIVE' ->
+	?LOG_NOTICE("ASP state request refused",
+			#{layer => m3ua, ep => EP, assoc => Assoc,
+			op => AspOp, reason => asp_down}),
+	gen_server:cast(From, {AspOp, confirm, Ref, {error, asp_down}}),
+	{next_state, down, StateData};
 down(EventType, EventContent, StateData) ->
 	handle_event(EventType, EventContent, down, StateData).
 
@@ -720,6 +732,10 @@ inactive({call, From}, {'MTP-TRANSFER', request, _Params},
 	NewCount = maps:put(transfer_discarded, Discarded + 1, Count),
 	{next_state, inactive, StateData#statedata{count = NewCount},
 			{reply, From, {error, unexpected_message}}};
+inactive(cast, {AspOp, request, Ref, From},
+		#statedata{req = undefined} = StateData)
+		when AspOp == 'M-ASP_UP'; AspOp == 'M-ASP_INACTIVE' ->
+	already(AspOp, Ref, From, inactive, StateData);
 inactive(EventType, EventContent, StateData) ->
 	handle_event(EventType, EventContent, inactive, StateData).
 
@@ -893,6 +909,10 @@ active({call, {From, Ref} = Caller},
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
+active(cast, {AspOp, request, Ref, From},
+		#statedata{req = undefined} = StateData)
+		when AspOp == 'M-ASP_UP'; AspOp == 'M-ASP_ACTIVE' ->
+	already(AspOp, Ref, From, active, StateData);
 active(EventType, EventContent, StateData) ->
 	handle_event(EventType, EventContent, active, StateData).
 
@@ -1244,6 +1264,19 @@ report_discarding(Cb, EP, Assoc) ->
 					indications => Discarded, reason => no_callback}),
 			ok
 	end.
+
+%% @hidden
+%% 	A local request for the state the asp is already in: answered at
+%% 	once, since there is nothing to ask of the peer. It fell to the
+%% 	catch-all and was discarded, so the caller waited out its timeout:
+%% 	m3ua:asp_active/2 on an asp already active never answered.
+already(AspOp, Ref, From, StateName,
+		#statedata{ep = EP, assoc = Assoc} = StateData) ->
+	?LOG_DEBUG("ASP state request answered, already in that state",
+			#{layer => m3ua, ep => EP, assoc => Assoc, op => AspOp,
+			state => StateName}),
+	gen_server:cast(From, {AspOp, confirm, Ref, ok}),
+	{next_state, StateName, StateData}.
 
 %% @hidden
 handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
