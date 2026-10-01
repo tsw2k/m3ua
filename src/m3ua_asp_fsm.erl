@@ -292,7 +292,6 @@
 				AsState :: down | inactive | active | pending}],
 		ual :: undefined | integer(),
 		req :: undefined | tuple(),
-		timer :: undefined | reference(),
 		ep :: pid(),
 		ep_name :: term(),
 		callback :: atom() | #m3ua_fsm_cb{},
@@ -596,9 +595,9 @@ down(cast, {'M-ASP_UP', request, Ref, From},
 			Req = {'M-ASP_UP', Ref, From},
 			UpOut = maps:get(up_out, Count, 0),
 			NewCount = maps:put(up_out, UpOut + 1, Count),
-			NewStateData = start_tack(StateData#statedata{req = Req,
-					count = NewCount}),
-			{next_state, down, NewStateData};
+			NewStateData = StateData#statedata{req = Req,
+					count = NewCount},
+			{next_state, down, NewStateData, tack()};
 		{error, eagain} ->
 			% @todo flow control
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
@@ -679,9 +678,9 @@ inactive(cast, {'M-ASP_ACTIVE', request, Ref, From},
 			Req = {'M-ASP_ACTIVE', Ref, From},
 			ActiveOut = maps:get(active_out, Count, 0),
 			NewCount = maps:put(active_out, ActiveOut + 1, Count),
-			NewStateData = start_tack(StateData#statedata{req = Req,
-					count = NewCount}),
-			{next_state, inactive, NewStateData};
+			NewStateData = StateData#statedata{req = Req,
+					count = NewCount},
+			{next_state, inactive, NewStateData, tack()};
 		{error, eagain} ->
 			% @todo flow control
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
@@ -698,9 +697,9 @@ inactive(cast, {'M-ASP_DOWN', request, Ref, From},
 			Req = {'M-ASP_DOWN', Ref, From},
 			DownOut = maps:get(down_out, Count, 0),
 			NewCount = maps:put(down_out, DownOut + 1, Count),
-			NewStateData = start_tack(StateData#statedata{req = Req,
-					count = NewCount}),
-			{next_state, inactive, NewStateData};
+			NewStateData = StateData#statedata{req = Req,
+					count = NewCount},
+			{next_state, inactive, NewStateData, tack()};
 		{error, eagain} ->
 			% @todo flow control
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
@@ -819,9 +818,9 @@ active(cast, {'M-ASP_INACTIVE', request, Ref, From},
 			Req = {'M-ASP_INACTIVE', Ref, From},
 			InactiveOut = maps:get(inactive_out, Count, 0),
 			NewCount = maps:put(inactive_out, InactiveOut + 1, Count),
-			NewStateData = start_tack(StateData#statedata{req = Req,
-					count = NewCount}),
-			{next_state, active, NewStateData};
+			NewStateData = StateData#statedata{req = Req,
+					count = NewCount},
+			{next_state, active, NewStateData, tack()};
 		{error, eagain} ->
 			% @todo flow control
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
@@ -838,9 +837,9 @@ active(cast, {'M-ASP_DOWN', request, Ref, From},
 			Req = {'M-ASP_DOWN', Ref, From},
 			DownOut = maps:get(down_out, Count, 0),
 			NewCount = maps:put(down_out, DownOut + 1, Count),
-			NewStateData = start_tack(StateData#statedata{req = Req,
-					count = NewCount}),
-			{next_state, active, NewStateData};
+			NewStateData = StateData#statedata{req = Req,
+					count = NewCount},
+			{next_state, active, NewStateData, tack()};
 		{error, eagain} ->
 			% @todo flow control
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
@@ -1018,12 +1017,11 @@ handle_event({call, From}, Request, StateName,
 			request => Request, reason => no_clause}),
 	{next_state, StateName, StateData,
 			{reply, From, {error, unexpected_request}}};
-handle_event(info, {timeout, Timer, tack}, StateName,
-		#statedata{timer = Timer, req = Req} = StateData)
-		when Req /= undefined ->
-	?MODULE:StateName(timeout, tack,
-			StateData#statedata{timer = undefined});
-handle_event(info, {timeout, _Timer, tack}, StateName, StateData) ->
+handle_event({timeout, tack}, tack, StateName,
+		#statedata{req = Req} = StateData) when Req /= undefined ->
+	?MODULE:StateName(timeout, tack, StateData);
+handle_event({timeout, tack}, tack, StateName, StateData) ->
+	%% The request it timed has been answered.
 	{next_state, StateName, StateData};
 handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort,
 		{[#sctp_sndrcvinfo{stream = Stream}], Data}},
@@ -1309,8 +1307,8 @@ handle_reg({'M-RK_REG', request, Ref, From, RC, NA, Keys, Mode, AS},
 	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Message) of
 		ok ->
 			Req = {'M-RK_REG', Ref, From, RK},
-			NewStateData = start_tack(StateData#statedata{req = Req}),
-			{next_state, StateName, NewStateData};
+			NewStateData = StateData#statedata{req = Req},
+			{next_state, StateName, NewStateData, tack()};
 		{error, Reason} ->
 			{stop, {shutdown, {{EP, Assoc}, Reason}}, StateData}
 	end;
@@ -1383,9 +1381,9 @@ handle_dereg({'M-RK_DEREG', request, Ref, From, RC}, StateName,
 			Req = {'M-RK_DEREG', Ref, From, RC},
 			DeregOut = maps:get(dereg_out, Count, 0),
 			NewCount = maps:put(dereg_out, DeregOut + 1, Count),
-			NewStateData = start_tack(StateData#statedata{req = Req,
-					count = NewCount}),
-			{next_state, StateName, NewStateData};
+			NewStateData = StateData#statedata{req = Req,
+					count = NewCount},
+			{next_state, StateName, NewStateData, tack()};
 		{error, eagain} ->
 			% @todo flow control
 			{stop, {shutdown, {{EP, Assoc}, eagain}}, StateData};
@@ -1930,16 +1928,12 @@ send_error(ErrorCode, StateName,
 %% 	Time the acknowledgement of the request just sent. An event
 %% 	timeout would not do: any event at all cancels it, so traffic
 %% 	arriving while the acknowledgement is awaited left the request
-%% 	outstanding for ever. A timer that fires after its request has
-%% 	been answered, or been replaced, is ignored by handle_event/4.
-start_tack(#statedata{timer = Timer} = StateData) ->
-	case Timer of
-		undefined ->
-			ok;
-		_ ->
-			erlang:cancel_timer(Timer)
-	end,
-	StateData#statedata{timer = erlang:start_timer(?Tack, self(), tack)}.
+%% 	outstanding for ever. A generic timeout is cancelled by nothing
+%% 	but another of its name, which the next request starts; one that
+%% 	fires after its request has been answered is ignored by
+%% 	handle_event/4.
+tack() ->
+	{{timeout, tack}, ?Tack, tack}.
 
 %% @hidden
 %% 	A callback on the path the traffic takes. An exception raised in it
