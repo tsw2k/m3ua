@@ -1020,6 +1020,20 @@ handle_event({call, From}, Request, StateName,
 handle_event({timeout, tack}, tack, StateName,
 		#statedata{req = Req} = StateData) when Req /= undefined ->
 	?MODULE:StateName(timeout, tack, StateData);
+%% The timeout of a request the state the asp is now in has no clause
+%% for: it moved on while the request was outstanding. Answered as
+%% timed out all the same; a function_clause here would have taken the
+%% association with it, and left alone the caller waits for ever.
+handle_event(timeout, tack, StateName,
+		#statedata{req = Req, ep = EP, assoc = Assoc} = StateData)
+		when is_tuple(Req), tuple_size(Req) >= 3 ->
+	Op = element(1, Req),
+	gen_server:cast(element(3, Req), {Op, confirm, element(2, Req),
+			{error, timeout}}),
+	?LOG_NOTICE("Request timed out",
+			#{layer => m3ua, ep => EP, assoc => Assoc, state => StateName,
+			op => Op, reason => timeout}),
+	{next_state, StateName, StateData#statedata{req = undefined}};
 handle_event({timeout, tack}, tack, StateName, StateData) ->
 	%% The request it timed has been answered.
 	{next_state, StateName, StateData};
