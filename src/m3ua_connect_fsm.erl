@@ -54,6 +54,8 @@
 		%% Associations that came up and have ended since this
 		%% endpoint started, for m3ua_status.
 		ended = 0 :: non_neg_integer(),
+		%% Attempts to connect that have failed in a row.
+		failed = 0 :: non_neg_integer(),
 		%% m3ua:start/3's `{copy, MFA}', for the state machines.
 		copy :: undefined | {module(), atom(), term()},
 		callback :: {Module :: atom(), State :: term()}}).
@@ -175,34 +177,27 @@ connecting({timeout, retry}, connect, #statedata{options = LocalOptions,
 									local_port = LocalPort},
 							{next_state, connecting, NewStateData};
 						{error, ReasonConnect} ->
-							?LOG_WARNING("Connect failed",
-									#{layer => m3ua, ep => self(), name => Name,
-									remote => {RemoteAddress, RemotePort},
-									reason => ReasonConnect}),
 							?LOG_DEBUG("Connect failed",
-									#{layer => m3ua, ep => self(),
+									#{layer => m3ua, ep => self(), name => Name,
 									options => ConnectOptions}),
 							m3ua_sctp:close(Socket),
-							NewStateData = StateData#statedata{socket = undefined,
-									local_addr = undefined,
-									local_port = undefined},
-							{next_state, connecting, NewStateData,
-										{{timeout, retry}, ?ERROR_WAIT, connect}}
+							attempt_failed(warning, connect_init, ReasonConnect,
+									?ERROR_WAIT, StateData)
 					end;
 				{error, ReasonPort} ->
-					?LOG_ERROR("Socket has no local address",
-							#{layer => m3ua, ep => self(), name => Name,
-							reason => ReasonPort}),
 					m3ua_sctp:close(Socket),
-					{stop, ReasonPort}
+					attempt_failed(error, sockname, ReasonPort,
+							?ERROR_WAIT, StateData)
 			end;
 		{error, ReasonOpen} ->
-			?LOG_ERROR("Socket not opened",
-					#{layer => m3ua, ep => self(), name => Name,
-					reason => ReasonOpen}),
+			%% A device not there yet, as while the host boots, or no
+			%% descriptors to spare: waited out like any other failure.
+			%% Stopping here had the supervisor restart the endpoint at
+			%% once, ten times in a minute, and then give it up.
 			?LOG_DEBUG("Socket not opened",
-					#{layer => m3ua, ep => self(), options => LocalOptions}),
-			{stop, ReasonOpen}
+					#{layer => m3ua, ep => self(), name => Name,
+					options => LocalOptions}),
+			attempt_failed(error, open, ReasonOpen, ?ERROR_WAIT, StateData)
 	end;
 connecting(cast, {'M-SCTP_RELEASE', request, Ref, From},
 		#statedata{socket = Socket} = StateData) ->
@@ -277,6 +272,11 @@ handle_event({call, From}, getassoc, StateName,
 handle_event({call, From}, getassoc, StateName,
 		#statedata{assoc = Assoc} = StateData) ->
 	{next_state, StateName, StateData, {reply, From, [Assoc]}};
+handle_event({call, From}, {getstat, _Options}, StateName,
+		#statedata{socket = undefined} = StateData) ->
+	%% Waiting to connect again: there is no socket to count.
+	{next_state, StateName, StateData,
+			{reply, From, {error, not_connected}}};
 handle_event({call, From}, {getstat, undefined}, StateName,
 		#statedata{socket = Socket} = StateData) ->
 	{next_state, StateName, StateData,
@@ -299,19 +299,11 @@ handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort,
 	handle_connect(AssocChange, NewStateData);
 handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort,
 		{_AncData, #sctp_assoc_change{state = State}}}, connecting,
-		#statedata{socket = Socket, receiver = Receiver, name = Name,
-		remote_addr = Address, remote_port = Port} = StateData) ->
+		#statedata{socket = Socket, receiver = Receiver} = StateData) ->
 	%% The peer did not answer the INIT in time, or refused it.
-	?LOG_WARNING("Connect failed",
-			#{layer => m3ua, ep => self(), name => Name,
-			remote => {Address, Port}, reason => State}),
 	m3ua_receiver:stop(Receiver),
 	m3ua_sctp:close(Socket),
-	NewStateData = StateData#statedata{socket = undefined,
-			receiver = undefined, local_addr = undefined,
-			local_port = undefined},
-	{next_state, connecting, NewStateData,
-			{{timeout, retry}, ?RETRY_WAIT, connect}};
+	attempt_failed(warning, handshake, State, ?RETRY_WAIT, StateData);
 handle_event(info, {sctp, Socket, _PeerAddr, _PeerPort, {_AncData, Event}},
 		StateName, #statedata{socket = Socket,
 		receiver = Receiver} = StateData)
@@ -412,8 +404,9 @@ handle_connect(AssocChange, #statedata{socket = Socket,
 			case m3ua_sctp:controlling_process(Socket, Fsm) of
 				ok ->
 					link(Fsm),
+					connected_after(StateData),
 					NewStateData = StateData#statedata{fsm = Fsm,
-							receiver = undefined},
+							receiver = undefined, failed = 0},
 					{next_state, connected, NewStateData};
 				{error, Reason} ->
 					_ = supervisor:terminate_child(Sup, Fsm),
@@ -440,10 +433,42 @@ not_connected(Stage, Reason, #sctp_assoc_change{assoc_id = Assoc},
 			#{layer => m3ua, ep => self(), assoc => Assoc,
 			remote => {Address, Port}, stage => Stage, reason => Reason}),
 	NewStateData = ended(StateData#statedata{socket = undefined,
-			receiver = undefined, local_addr = undefined,
+			receiver = undefined, assoc = undefined, local_addr = undefined,
 			local_port = undefined}),
 	{next_state, connecting, NewStateData,
 			{{timeout, retry}, ?RETRY_WAIT, connect}}.
+
+%% @hidden
+%% 	An attempt to connect that failed at `Stage': try again after
+%% 	`Wait'. Said at `Level' the first time and at debug, with the
+%% 	count, while it goes on failing -- a peer down for an hour would
+%% 	otherwise say the same thing two hundred times -- and at notice
+%% 	once an attempt succeeds (connected_after/1).
+attempt_failed(Level, Stage, Reason, Wait, #statedata{failed = Failed,
+		name = Name, remote_addr = Address, remote_port = Port} = StateData) ->
+	Meta = #{layer => m3ua, ep => self(), name => Name,
+			remote => {Address, Port}, stage => Stage, reason => Reason,
+			failed => Failed + 1, wait => Wait},
+	case Failed of
+		0 ->
+			?LOG(Level, "Connect failed, trying again", Meta);
+		_ ->
+			?LOG_DEBUG("Connect failed, trying again", Meta)
+	end,
+	NewStateData = StateData#statedata{socket = undefined,
+			receiver = undefined, local_addr = undefined,
+			local_port = undefined, failed = Failed + 1},
+	{next_state, connecting, NewStateData,
+			{{timeout, retry}, Wait, connect}}.
+
+%% @hidden
+connected_after(#statedata{failed = 0}) ->
+	ok;
+connected_after(#statedata{failed = Failed, name = Name,
+		remote_addr = Address, remote_port = Port, assoc = Assoc}) ->
+	?LOG_NOTICE("Connected after failed attempts",
+			#{layer => m3ua, ep => self(), name => Name, assoc => Assoc,
+			remote => {Address, Port}, failed => Failed}).
 
 %% @hidden
 ended(#statedata{ended = Ended} = StateData) ->

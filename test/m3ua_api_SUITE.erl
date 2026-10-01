@@ -100,6 +100,7 @@ all() ->
 			connect_options, connect_device, sctp_timers, stop_endpoint, lm_stray,
 			reconnect_in_place,
 			listen_not_accepted, connect_not_taken, connect_retry_asked,
+			connect_open_fails,
 			asp_states,
 			endpoint_gives_up, lm_restart, callback_raised, asp_up_ack_unexpected,
 			asp_drst_dupu, asp_restricted_congestion,
@@ -1427,25 +1428,33 @@ raw_send(Peer, PeerAssoc, Packet) ->
 %% @hidden
 %% 	An active asp or sgp, facing a plain SCTP peer, sends five DATA as
 %% 	fast as it is asked to: the milliseconds from the first send to
-%% 	the last arrival.
+%% 	the last arrival. The endpoint and the peer go however it ends.
 back_to_back(Role, Options) ->
 	Ref = make_ref(),
 	DPC = rand:uniform(16383),
 	OPC = rand:uniform(16383),
-	{Peer, _PeerAssoc, EP, Fsm} = active(Role, Ref, DPC, OPC, Options),
-	T0 = erlang:monotonic_time(microsecond),
-	[ok = m3ua:transfer(Fsm, 1, undefined, OPC, DPC, 0, 3, SLS, <<SLS>>)
-			|| SLS <- lists:seq(1, 5)],
-	ok = arrived(Peer, 5),
-	T1 = erlang:monotonic_time(microsecond),
-	ok = m3ua:stop(EP),
-	ok = gen_sctp:close(Peer),
-	(T1 - T0) / 1000.
+	{Peer, PeerAssoc, EP, Assoc} = case Role of
+		asp ->
+			raw_sg(sgp_cb(Ref), Options);
+		sgp ->
+			raw_asp(sgp_cb(Ref), Options)
+	end,
+	try
+		Fsm = wait(Ref),
+		ok = activate(Role, Peer, PeerAssoc, EP, Assoc, DPC),
+		T0 = erlang:monotonic_time(microsecond),
+		[ok = m3ua:transfer(Fsm, 1, undefined, OPC, DPC, 0, 3, SLS, <<SLS>>)
+				|| SLS <- lists:seq(1, 5)],
+		ok = arrived(Peer, 5),
+		T1 = erlang:monotonic_time(microsecond),
+		(T1 - T0) / 1000
+	after
+		_ = m3ua:stop(EP),
+		_ = gen_sctp:close(Peer)
+	end.
 
 %% @hidden
-active(asp, Ref, _DPC, _OPC, Options) ->
-	{Peer, PeerAssoc, EP, Assoc} = raw_sg(sgp_cb(Ref), Options),
-	Asp = wait(Ref),
+activate(asp, Peer, PeerAssoc, EP, Assoc, _DPC) ->
 	Self = self(),
 	spawn_link(fun() -> Self ! {up, m3ua:asp_up(EP, Assoc)} end),
 	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUP),
@@ -1454,17 +1463,14 @@ active(asp, Ref, _DPC, _OPC, Options) ->
 	spawn_link(fun() -> Self ! {active, m3ua:asp_active(EP, Assoc)} end),
 	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPAC),
 	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPACACK)),
-	receive {active, ok} -> ok after 2000 -> ct:fail(asp_active) end,
-	{Peer, PeerAssoc, EP, Asp};
-active(sgp, Ref, DPC, _OPC, Options) ->
-	{Peer, PeerAssoc, EP, _Assoc} = raw_asp(sgp_cb(Ref), Options),
-	Sgp = wait(Ref),
+	receive {active, ok} -> ok after 2000 -> ct:fail(asp_active) end;
+activate(sgp, Peer, PeerAssoc, _EP, _Assoc, DPC) ->
 	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUP)),
 	#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUPACK),
 	_RC = raw_register(Peer, PeerAssoc, undefined, [{DPC, [], []}]),
 	ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPAC)),
 	#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPACACK),
-	{Peer, PeerAssoc, EP, Sgp}.
+	ok.
 
 %% @hidden
 %% 	N DATA at the peer, passing over any NTFY.
@@ -1968,23 +1974,40 @@ connect_retry_asked() ->
 	[{userdata, [{doc, "An endpoint whose connect failed connects again after its wait, however often it is asked about meanwhile."}]}].
 
 connect_retry_asked(_Config) ->
-	%% A port nothing listens on: the INIT is refused.
-	{ok, Probe} = gen_sctp:open([{ip, {127,0,0,1}}]),
-	{ok, {_, Port}} = inet:sockname(Probe),
-	ok = gen_sctp:close(Probe),
+	%% A port bound and not listening: held for the peer all along, so
+	%% nothing else on the host can take it, and the INIT is refused.
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	{ok, {_, Port}} = inet:sockname(Peer),
 	{ok, EP} = m3ua:start(callback(make_ref()), 0,
 			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
 	%% Asked for its details and its associations while it waits, as
 	%% a management walk or a watchdog does. The wait used to be one
 	%% that any event cancelled or started again.
-	timeout = asked(EP, undefined, 4),
-	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}},
-			{port, Port}]),
+	timeout = asked(EP, Peer, 4),
 	ok = gen_sctp:listen(Peer, true),
 	ok = asked(EP, Peer, 40),
 	[_] = assoc(EP, 40),
+	%% The same process throughout: nothing it was asked killed it.
+	true = is_process_alive(EP),
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
+
+connect_open_fails() ->
+	[{userdata, [{doc, "A connect endpoint whose socket cannot be opened waits and tries again, rather than stopping until its supervisor gives it up."}]}].
+
+connect_open_fails(_Config) ->
+	%% A device that is not there, as a VRF not yet up while the host
+	%% boots: every socket opened for the endpoint fails.
+	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+			[{role, asp}, {device, "m3ua-none"},
+			{connect, {127,0,0,1}, 9, []}]),
+	timer:sleep(1000),
+	%% It used to stop, and be restarted at once, ten times in well
+	%% under a minute, and then be given up.
+	true = is_process_alive(EP),
+	{error, not_connected} = m3ua:getstat(EP),
+	[] = m3ua:get_assoc(EP),
+	ok = m3ua:stop(EP).
 
 asp_states() ->
 	[{userdata, [{doc, "Each endpoint and association is readable with no process asked: by name, state as it changes, counters within a second, and gone when it goes."}]}].
@@ -2109,6 +2132,12 @@ asked(EP, Peer, N) ->
 		500 ->
 			{_, client, asp, _, _} = m3ua:get_ep(EP),
 			_ = m3ua:get_assoc(EP),
+			case m3ua:getstat(EP) of
+				{ok, _} ->
+					ok;
+				{error, not_connected} ->
+					ok
+			end,
 			asked(EP, Peer, N - 1)
 	end.
 

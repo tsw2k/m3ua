@@ -95,11 +95,12 @@ association:
 - a connect endpoint whose association ends connects again as the same
   process, instead of dying and being restarted;
 - a connect endpoint whose connect fails -- the INIT unanswered after its
-  retransmissions, or refused -- says so at warning and tries again 8 s
-  later, or 30 s later where the connect call itself failed, with no
+  retransmissions, or refused -- tries again 8 s later, or 30 s later where
+  the socket could not be opened or the connect call itself failed, with no
   backoff and no end. Asking the endpoint about itself meanwhile
   (`m3ua:get_ep/1`, `get_assoc/1`, `getstat`) no longer stops or delays
-  that;
+  that; `getstat` answers `{error, not_connected}` while there is no
+  socket;
 - an endpoint whose supervisor gives up (ten restarts a minute) is gone, and
   nothing else is. It is not started again: that is its owner's call;
 - `m3ua_lm_server` restarts alone and takes on the endpoints and associations
@@ -162,7 +163,9 @@ reported:
 - a callback that raised, at `error` with its stack trace;
 - anything the layer manager has no clause for, at `warning`;
 - a connect endpoint connecting again after its association ended, at
-  `notice`, and one whose attempt failed, at `warning`;
+  `notice`; the first of a run of failed attempts to connect at `warning`
+  (`error` where no socket could be opened), the rest at `debug` with their
+  count, and the connect that ends the run at `notice`;
 - an SCTP send failure, at `error`; an SCTP remote error, a socket that would
   not close, and a metrics query that failed, at `warning`.
 
