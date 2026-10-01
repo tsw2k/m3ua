@@ -126,7 +126,7 @@ init([Sup, Callback, Opts] = _Args) ->
 		{value, {ppi, false}, O6} ->
 			O6;
 		{value, {ppi, true}, O6} ->
-			[O6] ++ PpiOptions;
+			O6 ++ PpiOptions;
 		false ->
 			Opts5 ++ PpiOptions
 	end,
