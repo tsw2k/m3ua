@@ -45,6 +45,15 @@ suite() ->
 %%
 init_per_suite(Config) ->
 	PrivDir = ?config(priv_dir, Config),
+	%% Common Test's log keeps the text of a report and drops its
+	%% metadata, which is where this library puts the reason, the stage
+	%% and what it happened to: "Association not accepted" said nothing
+	%% more. This file keeps every event at notice and above, one line
+	%% each, with its metadata.
+	ok = logger:add_handler(m3ua_events, logger_std_h,
+			#{level => notice,
+			config => #{file => filename:join(PrivDir, "m3ua_events.log")},
+			formatter => {?MODULE, #{}}}),
 	application:load(mnesia),
 	ok = application:set_env(mnesia, dir, PrivDir),
 	{ok, [m3ua_asp, m3ua_as]} = m3ua_app:install(),
@@ -56,6 +65,7 @@ init_per_suite(Config) ->
 %% Cleanup after the whole suite.
 %%
 end_per_suite(_Config) ->
+	_ = logger:remove_handler(m3ua_events),
 	ok = application:stop(m3ua),
 	ok = application:stop(inets),
 	ok = application:stop(mnesia).
@@ -2938,6 +2948,20 @@ as_state_down(_Config) ->
 %%---------------------------------------------------------------------
 %%  Internal functions
 %%---------------------------------------------------------------------
+
+%% @hidden
+%% 	The formatter of m3ua_events.log: logger's own line, then every
+%% 	metadata key the event carried that it did not already print.
+format(#{meta := Meta} = Event, _Config) ->
+	Line = logger_formatter:format(Event, #{single_line => true,
+			template => [time, " ", level, " ", pid, " ", mfa, ": ", msg]}),
+	Rest = maps:without([time, gl, pid, mfa, file, line, domain,
+			report_cb, error_logger, logger_formatter], Meta),
+	[Line, " ", io_lib:format("~0tp", [Rest]), "\n"].
+
+%% @hidden
+check_config(_Config) ->
+	ok.
 
 callback(Ref) ->
 	Finit = fun(_Module, _Asp, _EP, _EpName, _Assoc, _Options, Pid) ->
