@@ -115,8 +115,8 @@ init([Sup, Callback, Opts] = _Args) ->
 			{true, Opts3}
 	end,
 	{AsptmRC, Opts4b} = case lists:keytake(asptm_rc, 1, Opts4) of
-		{value, {asptm_rc, R6}, O6} ->
-			{R6, O6};
+		{value, {asptm_rc, R4b}, O4b} ->
+			{R4b, O4b};
 		false ->
 			{false, Opts4}
 	end,

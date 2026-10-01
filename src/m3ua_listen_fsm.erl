@@ -107,8 +107,8 @@ init([Sup, Callback, Opts] = _Args) ->
 			{true, Opts3}
 	end,
 	{AsptmRC, Opts4b} = case lists:keytake(asptm_rc, 1, Opts4) of
-		{value, {asptm_rc, R6}, O6} ->
-			{R6, O6};
+		{value, {asptm_rc, R4b}, O4b} ->
+			{R4b, O4b};
 		false ->
 			{false, Opts4}
 	end,
@@ -137,7 +137,7 @@ init([Sup, Callback, Opts] = _Args) ->
 			{ok, Socket} ->
 				StateData = #statedata{socket = Socket, sup = Sup, role = Role,
 						name = Name, static = Static, use_rc = UseRC,
-					asptm_rc = AsptmRC,
+						asptm_rc = AsptmRC,
 						options = Options, cb_options = CbOpts, callback = Callback,
 						copy = Copy},
 				case m3ua_sctp:listen(Socket) of
