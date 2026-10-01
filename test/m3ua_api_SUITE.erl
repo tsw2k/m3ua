@@ -378,8 +378,8 @@ ack_timeout(_Config) ->
 	_ = spawn(fun() -> Self ! {asp_up, m3ua:asp_up(EP, Assoc)} end),
 	#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPUP} = raw_get(Peer),
 	%% No ASP UP ACK, but a BEAT every half second for five seconds:
-	%% each would have cancelled a gen_fsm timeout, and the request
-	%% would have waited for ever.
+	%% each would cancel an event timeout, and with one the request
+	%% would wait for ever. The asp times it with a generic timeout.
 	BeatMsg = #m3ua{class = ?ASPSMMessage, type = ?ASPSMBEAT, params = <<>>},
 	Beat = m3ua_codec:m3ua(BeatMsg),
 	F = fun F(0) ->
