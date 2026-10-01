@@ -115,8 +115,10 @@ init([Sup, Callback, Opts] = _Args) ->
 			{true, Opts3}
 	end,
 	{AsptmRC, Opts4b} = case lists:keytake(asptm_rc, 1, Opts4) of
-		{value, {asptm_rc, R4b}, O4b} ->
+		{value, {asptm_rc, R4b}, O4b} when is_boolean(R4b) ->
 			{R4b, O4b};
+		{value, {asptm_rc, R4b}, _} ->
+			erlang:error({badarg, {asptm_rc, R4b}});
 		false ->
 			{false, Opts4}
 	end,
@@ -399,15 +401,21 @@ get_sup(#statedata{role = sgp, sup = Sup} = StateData) ->
 	StateData#statedata{fsm_sup = SgpSup}.
 
 %% @hidden
+%% 	What the state machines of this endpoint take from its options, as
+%% 	one map: the next option is a change here and where it is used,
+%% 	not to every start list and init/1 between them.
+fsm_options(#statedata{static = Static, use_rc = UseRC,
+		cb_options = CbOpts, copy = Copy, asptm_rc = AsptmRC}) ->
+	#{static => Static, use_rc => UseRC, cb_opts => CbOpts, copy => Copy,
+			asptm_rc => AsptmRC}.
+
+%% @hidden
 handle_connect(AssocChange, #statedata{socket = Socket,
 		receiver = Receiver, fsm_sup = Sup, remote_addr = Address,
-		remote_port = Port, name = Name, cb_options = CbOpts,
-		callback = Cb, static = Static, copy = Copy,
-		use_rc = UseRC, asptm_rc = AsptmRC} = StateData) ->
+		remote_port = Port, name = Name, callback = Cb} = StateData) ->
 	ok = m3ua_receiver:stop(Receiver),
 	case start_fsm(Sup, [[Socket, Address, Port,
-			AssocChange, self(), Name, Cb, Static, UseRC, CbOpts, Copy, AsptmRC],
-			[]]) of
+			AssocChange, self(), Name, Cb, fsm_options(StateData)], []]) of
 		{ok, Fsm} ->
 			case m3ua_sctp:controlling_process(Socket, Fsm) of
 				ok ->
