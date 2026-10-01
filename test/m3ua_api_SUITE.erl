@@ -109,7 +109,7 @@ all() ->
 			sgp_asp_up_inactive, sgp_aspia_inactive, sgp_asptm_rc, sgp_asp_up_active, sgp_deregister, sgp_dereg_req,
 			sgp_transfer_rc, data_nodelay, sgp_static_register,
 			lifecycle_contained,
-			asp_sgp_one_node, copy_messages, asp_register_down,
+			asp_sgp_one_node, copy_messages, asp_register_down, asp_asptm_rc,
 			sgp_register_down, asp_request_in_place, sgp_as_pending,
 			sgp_as_pending_on_loss, sgp_override_takeover, asp_alternate_active,
 			sgp_deregister_local, sgp_deregister_named, asp_deregister,
@@ -846,6 +846,13 @@ asp_register_down(_Config) ->
 	ok = m3ua:stop(EP),
 	ok = gen_sctp:close(Peer).
 
+asp_asptm_rc() ->
+	[{userdata, [{doc, "With {asptm_rc, true} an ASP names its routing contexts in ASP Active and ASP Inactive; without it, in neither."}]}].
+
+asp_asptm_rc(_Config) ->
+	{_, none, none} = asptm_rcs([]),
+	{RC, [RC], [RC]} = asptm_rcs([{asptm_rc, true}]).
+
 sgp_register_down() ->
 	[{userdata, [{doc, "At a gateway, a static registration made before the peer's ASPUP is taken and carried into service by it; any other is refused at once."}]}].
 
@@ -1483,6 +1490,41 @@ arrived(Peer, N) ->
 		Other ->
 			{missing, N, Other}
 	end.
+
+%% @hidden
+%% 	A static asp with one routing context, taken active and inactive
+%% 	again by a plain SCTP peer: its context, and the contexts its ASPAC
+%% 	and ASPIA named (`none' for none).
+asptm_rcs(Options) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(callback(make_ref()),
+			[{static, true} | Options]),
+	try
+		Self = self(),
+		spawn_link(fun() -> Self ! {up, m3ua:asp_up(EP, Assoc)} end),
+		#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUP),
+		ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUPACK)),
+		receive {up, ok} -> ok after 2000 -> ct:fail(asp_up) end,
+		RC = unused_rc(),
+		{ok, RC} = m3ua:register(EP, Assoc, RC, undefined,
+				[{rand:uniform(16383), [], []}], loadshare),
+		spawn_link(fun() -> Self ! {active, m3ua:asp_active(EP, Assoc)} end),
+		#m3ua{params = Active} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPAC),
+		ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPACACK)),
+		receive {active, ok} -> ok after 2000 -> ct:fail(asp_active) end,
+		spawn_link(fun() -> Self ! {inactive, m3ua:asp_inactive(EP, Assoc)} end),
+		#m3ua{params = Inactive} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPIA),
+		ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPIAACK)),
+		receive {inactive, ok} -> ok after 2000 -> ct:fail(asp_inactive) end,
+		{RC, rcs(Active), rcs(Inactive)}
+	after
+		_ = m3ua:stop(EP),
+		_ = gen_sctp:close(Peer)
+	end.
+
+%% @hidden
+rcs(Params) ->
+	m3ua_codec:get_parameter(?RoutingContext,
+			m3ua_codec:parameters(Params), none).
 
 %% @hidden
 raw_put(Peer, PeerAssoc, Packet) ->

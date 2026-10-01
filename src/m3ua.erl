@@ -39,6 +39,7 @@
 		| {role, sgp | asp}
 		| {static, boolean()}
 		| {use_rc, boolean()}
+		| {asptm_rc, boolean()}
 		| {ppi, boolean()}
 		| {cb_opts, term()}
 		| {copy, {Module :: module(), Function :: atom(), Arg :: term()}}
@@ -57,8 +58,15 @@
 %% 		(default: `false').</dd>
 %% 	<dt>use_rc</dt>
 %% 		<dd>If `false' the Routing Context (RC) parameter will
-%% 		not be included in ASP Traffic Maintenance (ASPTM) Messages
+%% 		not be included in Payload Data (DATA) messages
 %% 		(default: `true').</dd>
+%% 	<dt>asptm_rc</dt>
+%% 		<dd>If `true' an ASP names the routing contexts it has in the
+%% 		ASP Traffic Maintenance (ASPTM) messages it sends, ASP Active
+%% 		and ASP Inactive; without them they apply to every application
+%% 		server the ASP is configured for at the peer (RFC4666 4.3.4.3).
+%% 		A peer that does not know a context named answers with an
+%% 		Error (default: `false').</dd>
 %% 	<dt>ppi</dt>
 %% 		<dd>If `false' the (optional) SCTP Payload Protocol Identifier (PPI)
 %% 		will not be included (see RFC4666 7.1). If `true' PPI will be

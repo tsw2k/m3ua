@@ -44,6 +44,7 @@
 		role :: sgp | asp,
 		static :: boolean(),
 		use_rc :: boolean(),
+		asptm_rc = false :: boolean(),
 		local_addr :: undefined | inet:ip_address(),
 		local_port :: undefined | inet:port_number(),
 		remote_addr :: inet:ip_address(),
@@ -113,11 +114,17 @@ init([Sup, Callback, Opts] = _Args) ->
 		false ->
 			{true, Opts3}
 	end,
-	{CbOpts, Opts4a} = case lists:keytake(cb_opts, 1, Opts4) of
+	{AsptmRC, Opts4b} = case lists:keytake(asptm_rc, 1, Opts4) of
+		{value, {asptm_rc, R6}, O6} ->
+			{R6, O6};
+		false ->
+			{false, Opts4}
+	end,
+	{CbOpts, Opts4a} = case lists:keytake(cb_opts, 1, Opts4b) of
 		{value, {cb_opts, R5}, O5} ->
 			{R5, O5};
 		false ->
-			{[], Opts4}
+			{[], Opts4b}
 	end,
 	{Copy, Opts5} = copy_option(Opts4a),
 	PpiOptions = [{sctp_events, #sctp_event_subscribe{adaptation_layer_event = true}},
@@ -139,6 +146,7 @@ init([Sup, Callback, Opts] = _Args) ->
 			process_flag(trap_exit, true),
 			StateData = #statedata{sup = Sup, role = Role,
 					name = Name, static = Static, use_rc = UseRC,
+					asptm_rc = AsptmRC,
 					options = Options, cb_options = CbOpts, callback = Callback,
 					copy = Copy,
 					remote_addr = Raddr, remote_port = Rport,
@@ -395,10 +403,10 @@ handle_connect(AssocChange, #statedata{socket = Socket,
 		receiver = Receiver, fsm_sup = Sup, remote_addr = Address,
 		remote_port = Port, name = Name, cb_options = CbOpts,
 		callback = Cb, static = Static, copy = Copy,
-		use_rc = UseRC} = StateData) ->
+		use_rc = UseRC, asptm_rc = AsptmRC} = StateData) ->
 	ok = m3ua_receiver:stop(Receiver),
 	case start_fsm(Sup, [[Socket, Address, Port,
-			AssocChange, self(), Name, Cb, Static, UseRC, CbOpts, Copy],
+			AssocChange, self(), Name, Cb, Static, UseRC, CbOpts, Copy, AsptmRC],
 			[]]) of
 		{ok, Fsm} ->
 			case m3ua_sctp:controlling_process(Socket, Fsm) of

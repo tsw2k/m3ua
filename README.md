@@ -77,6 +77,13 @@ association:
 
 **API.**
 
+- `{asptm_rc, true}` given to `m3ua:start/3` has an ASP name the routing
+  contexts it has in its ASP Active and ASP Inactive, for a peer that
+  carries several application servers over one association. Off by
+  default: without them the messages apply to every server the ASP is
+  configured for at the peer, and a peer that does not know a context
+  named answers with an ERR. `use_rc` is documented as what it always
+  did, the routing context in DATA.
 - `m3ua:deregister(EndPoint, Assoc, RoutingContext) -> ok | {error, Reason}`:
   at an ASP it sends a DEREG REQ; statically registered, or at a gateway, it
   is done locally.

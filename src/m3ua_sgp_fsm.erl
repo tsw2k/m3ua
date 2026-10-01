@@ -439,7 +439,7 @@ callback_mode() ->
 init([Socket, Address, Port,
 		#sctp_assoc_change{assoc_id = Assoc,
 		inbound_streams = InStreams, outbound_streams = OutStreams},
-		EP, EpName, Cb, Static, UseRC, CbOpts, Copy]) ->
+		EP, EpName, Cb, Static, UseRC, CbOpts, Copy, _AsptmRC]) ->
 	process_flag(trap_exit, true),
 	ok = copying(Copy, EpName, Assoc),
 	CbArgs = [?MODULE, self(), EP, EpName, Assoc, CbOpts],

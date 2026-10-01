@@ -287,6 +287,8 @@
 		assoc :: gen_sctp:assoc_id(),
 		static = false :: boolean(),
 		use_rc = true :: boolean(),
+		%% Name the routing contexts in ASPAC and ASPIA; see asptm/2.
+		asptm_rc = false :: boolean(),
 		rks = [] :: [{RC :: 0..4294967295,
 				RK :: m3ua:routing_key(),
 				AsState :: down | inactive | active | pending}],
@@ -504,7 +506,7 @@ callback_mode() ->
 init([Socket, Address, Port,
 		#sctp_assoc_change{assoc_id = Assoc,
 		inbound_streams = InStreams, outbound_streams = OutStreams},
-		EP, EpName, Cb, Static, UseRC, CbOpts, Copy]) ->
+		EP, EpName, Cb, Static, UseRC, CbOpts, Copy, AsptmRC]) ->
 	process_flag(trap_exit, true),
 	ok = copying(Copy, EpName, Assoc),
 	CbArgs = [?MODULE, self(), EP, EpName, Assoc, CbOpts],
@@ -516,7 +518,7 @@ init([Socket, Address, Port,
 					in_streams = InStreams, out_streams = OutStreams,
 					ep = EP, ep_name = EpName,
 					callback = Cb, cb_opts = CbOpts, cb_state = CbState,
-					static = Static, use_rc = UseRC},
+					static = Static, use_rc = UseRC, asptm_rc = AsptmRC},
 			report_discarding(Cb, EP, Assoc),
 			report_carrying(undefined, down, EP, Assoc),
 			{ok, down, Statedata, {timeout, 0, timeout}};
@@ -671,8 +673,7 @@ inactive(cast, {'M-RK_DEREG', request, _, _, _} = Event, StateData) ->
 inactive(cast, {'M-ASP_ACTIVE', request, Ref, From},
 		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
-	AspActive = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC},
-	Message = m3ua_codec:m3ua(AspActive),
+	Message = m3ua_codec:m3ua(asptm(?ASPTMASPAC, StateData)),
 	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Message) of
 		ok ->
 			Req = {'M-ASP_ACTIVE', Ref, From},
@@ -811,8 +812,7 @@ active(cast, {'MTP-TRANSFER', request, Ref, From,
 active(cast, {'M-ASP_INACTIVE', request, Ref, From},
 		#statedata{peer_addr = PeerAddr, peer_port = PeerPort, ppid = Ppid, req = undefined, socket = Socket,
 		assoc = Assoc, ep = EP, count = Count} = StateData) ->
-	AspInActive = #m3ua{class = ?ASPTMMessage, type = ?ASPTMASPIA},
-	Message = m3ua_codec:m3ua(AspInActive),
+	Message = m3ua_codec:m3ua(asptm(?ASPTMASPIA, StateData)),
 	case send(Socket, {PeerAddr, PeerPort}, 0, Ppid, Message) of
 		ok ->
 			Req = {'M-ASP_INACTIVE', Ref, From},
@@ -2048,6 +2048,22 @@ unexpected_up_ack(Previous, #statedata{req = Request,
 	end.
 
 %% @hidden
+%% 	An ASPAC or ASPIA. With `{asptm_rc, true}' it names the routing
+%% 	contexts the asp has, where it has any: RFC 4666 makes them
+%% 	optional, and without them the message applies to every server
+%% 	the asp is configured for at the peer, which is the ordinary case
+%% 	of one server to an association. Naming them is for a peer that
+%% 	carries several over one, and is off by default because a peer
+%% 	that does not know a context named answers with an ERR where a
+%% 	bare message would have been taken.
+asptm(Type, #statedata{asptm_rc = true, rks = [_ | _] = RKs}) ->
+	RCs = [RC || {RC, _RK, _AsState} <- RKs],
+	Params = m3ua_codec:parameters([{?RoutingContext, RCs}]),
+	#m3ua{class = ?ASPTMMessage, type = Type, params = Params};
+asptm(Type, #statedata{}) ->
+	#m3ua{class = ?ASPTMMessage, type = Type}.
+
+%% @hidden
 %% 	Ask the peer to put the asp back in `Previous'. No request is made
 %% 	of it and no timer set: the acknowledgement is taken by the clauses
 %% 	that take any other, and if none comes the asp stays inactive,
@@ -2057,7 +2073,7 @@ return_to(Previous, #statedata{socket = Socket, peer_addr = PeerAddr,
 		count = Count} = StateData) ->
 	{Message, Key} = case Previous of
 		active ->
-			{#m3ua{class = ?ASPTMMessage, type = ?ASPTMASPAC}, active_out};
+			{asptm(?ASPTMASPAC, StateData), active_out};
 		down ->
 			{#m3ua{class = ?ASPSMMessage, type = ?ASPSMASPDN}, down_out}
 	end,
