@@ -49,7 +49,9 @@ init_per_suite(Config) ->
 	%% metadata, which is where this library puts the reason, the stage
 	%% and what it happened to: "Association not accepted" said nothing
 	%% more. This file keeps every event at notice and above, one line
-	%% each, with its metadata.
+	%% each, with its metadata. One left by an earlier run in this node
+	%% that never reached end_per_suite goes first.
+	_ = logger:remove_handler(m3ua_events),
 	ok = logger:add_handler(m3ua_events, logger_std_h,
 			#{level => notice,
 			config => #{file => filename:join(PrivDir, "m3ua_events.log")},
@@ -120,6 +122,7 @@ all() ->
 			sgp_transfer_rc, data_nodelay, sgp_static_register,
 			lifecycle_contained,
 			asp_sgp_one_node, copy_messages, asp_register_down, asp_asptm_rc,
+			asp_sgp_asptm_rc,
 			sgp_register_down, asp_request_in_place, sgp_as_pending,
 			sgp_as_pending_on_loss, sgp_override_takeover, asp_alternate_active,
 			sgp_deregister_local, sgp_deregister_named, asp_deregister,
@@ -784,6 +787,40 @@ asp_sgp_one_node(_Config) ->
 	{error, unexpected_request} = gen_statem:call(Sgp, lifecycle_contained),
 	true = is_process_alive(Asp),
 	true = is_process_alive(Sgp),
+	ok = m3ua:stop(ClientEP),
+	ok = m3ua:stop(ServerEP).
+
+asp_sgp_asptm_rc() ->
+	[{userdata, [{doc, "An ASP with {asptm_rc, true} goes active and inactive at the fork's own gateway, which checks the routing contexts named and names them back in its acknowledgements."}]}].
+
+asp_sgp_asptm_rc(_Config) ->
+	RefS = make_ref(),
+	{ok, ServerEP} = m3ua:start(remote_cb(RefS), 0,
+			[{role, sgp}, {ip, {127,0,0,1}}]),
+	{_, server, sgp, {_, Port}} = m3ua:get_ep(ServerEP),
+	RefC = make_ref(),
+	{ok, ClientEP} = m3ua:start(remote_cb(RefC), 0,
+			[{role, asp}, {asptm_rc, true},
+			{connect, {127,0,0,1}, Port, []}]),
+	_Sgp = wait(RefS),
+	_Asp = wait(RefC),
+	[Assoc] = assoc(ClientEP, 40),
+	down = known(ClientEP, Assoc, 40),
+	ok = m3ua:asp_up(ClientEP, Assoc),
+	Keys = [{rand:uniform(16383), [], []}],
+	{ok, _RC} = m3ua:register(ClientEP, Assoc, undefined, undefined,
+			Keys, loadshare),
+	%% The ASPAC and the ASPIA name the context; the gateway knows it,
+	%% so neither is refused, and its ACKs name it back.
+	ok = m3ua:asp_active(ClientEP, Assoc),
+	active = m3ua:asp_status(ClientEP, Assoc),
+	ok = m3ua:asp_inactive(ClientEP, Assoc),
+	inactive = m3ua:asp_status(ClientEP, Assoc),
+	[ServerAssoc] = m3ua:get_assoc(ServerEP),
+	{ok, ServerCounts} = m3ua:getcount(ServerEP, ServerAssoc),
+	false = maps:is_key(asptm_refused, ServerCounts),
+	{ok, ClientCounts} = m3ua:getcount(ClientEP, Assoc),
+	false = maps:is_key(error_in, ClientCounts),
 	ok = m3ua:stop(ClientEP),
 	ok = m3ua:stop(ServerEP).
 
