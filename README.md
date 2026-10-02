@@ -105,8 +105,11 @@ association:
   retransmissions, or refused -- tries again 8 s later, or 30 s later where
   the socket could not be opened or the connect call itself failed, with no
   backoff and no end. Where the local address is still held by the
-  association before, closing (`eaddrnotavail`, `eaddrinuse`: a fixed
-  local port reconnecting at once), it tries again after 1 s. Asking the endpoint about itself meanwhile
+  association before, closing -- a fixed local port reconnecting at once,
+  told `eaddrnotavail` by the connect call or `eaddrinuse` by the bind --
+  it tries again after 1 s, ten times at most and then as any other
+  failure. `m3ua:asp_states/0` has the attempts that have failed in a row
+  as `failed`. Asking the endpoint about itself meanwhile
   (`m3ua:get_ep/1`, `get_assoc/1`, `getstat`) no longer stops or delays
   that; `getstat` answers `{error, not_connected}` while there is no
   socket;

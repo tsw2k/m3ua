@@ -59,6 +59,7 @@
 		remote => {[inet:ip_address()], inet:port_number()},
 		assoc_state := up | connecting | down,
 		ended := non_neg_integer(),
+		failed => non_neg_integer(),
 		assoc_id => gen_sctp:assoc_id(),
 		peer => {[inet:ip_address()], inet:port_number()},
 		asp_state => down | inactive | active,
@@ -84,9 +85,11 @@
 %% 	`connecting' where it connects and `down' where it listens.
 %%
 %% 	From the endpoint: `ep', `mode' (connect or listen), `role' (asp or
-%% 	sgp), `local_port', `remote' (connect only) and `ended', the number
-%% 	of associations that have ended on it. From the association's
-%% 	state machine: `assoc_id', `peer', `asp_state' (down, inactive or
+%% 	sgp), `local_port', `remote' (connect only), `ended', the number
+%% 	of associations that have ended on it, and `failed' (connect only),
+%% 	the attempts to connect that have failed in a row since the last
+%% 	that succeeded. From the association's state machine: `assoc_id',
+%% 	`peer', `asp_state' (down, inactive or
 %% 	active, for the association as a whole), `since', when it entered
 %% 	that state, `contexts', the state of each application server it is
 %% 	in as it was last told, `counters', those of m3ua:getcount/2, and

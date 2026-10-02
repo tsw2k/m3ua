@@ -899,6 +899,14 @@ asp_sgp_deregister(_Config) ->
 	ok = peer:stop(AsPeer).
 
 %% @hidden
+%% 	The attempts to connect that have failed in a row, as
+%% 	m3ua:asp_states/0 has them for endpoint EP.
+failed(EP) ->
+	[Failed] = lists:usort([F || {_, #{ep := E, failed := F}}
+			<- m3ua:asp_states(), E == EP]),
+	Failed.
+
+%% @hidden
 removed_as(_RC, 0) ->
 	still_there;
 removed_as(RC, N) ->
@@ -2185,6 +2193,8 @@ connect_port_busy(_Config) ->
 			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
 	ct:sleep(1500),
 	[] = m3ua:get_assoc(EP2),
+	%% Counted where a management walk reads it.
+	true = failed(EP2) > 0,
 	%% The first goes, as an association ended by the gateway does, and
 	%% the second is in within seconds rather than thirty.
 	ok = m3ua:stop(EP1),
@@ -2197,6 +2207,7 @@ connect_port_busy(_Config) ->
 	end,
 	[_] = assoc(EP2, 40),
 	true = is_process_alive(EP2),
+	0 = failed(EP2),
 	ok = m3ua:stop(EP2),
 	ok = gen_sctp:close(Peer).
 

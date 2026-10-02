@@ -64,8 +64,10 @@
 -define(RETRY_WAIT, 8000).
 -define(ERROR_WAIT, 30000).
 %% The local address and port are still held by the association before
-%% this one, closing; see failed_wait/1.
+%% this one, closing; see failed_wait/3. Tried this many times in a row
+%% at most, then ERROR_WAIT.
 -define(BUSY_WAIT, 1000).
+-define(BUSY_TRIES, 10).
 
 %%----------------------------------------------------------------------
 %%  The m3ua_connect_fsm gen_statem callbacks
@@ -157,7 +159,8 @@ init([Sup, Callback, Opts] = _Args) ->
 					remote_addr = Raddr, remote_port = Rport,
 					remote_opts = Ropts},
 			ok = m3ua_status:endpoint(#{name => Name, mode => connect,
-					role => Role, remote => {[Raddr], Rport}, ended => 0}),
+					role => Role, remote => {[Raddr], Rport}, ended => 0,
+					failed => 0}),
 			{ok, connecting, StateData, {{timeout, retry}, 0, connect}};
 		false ->
 			{stop, badarg}
@@ -195,7 +198,8 @@ connecting({timeout, retry}, connect, #statedata{options = LocalOptions,
 									options => ConnectOptions}),
 							m3ua_sctp:close(Socket),
 							attempt_failed(warning, connect_init, ReasonConnect,
-									failed_wait(ReasonConnect), StateData)
+									failed_wait(connect_init, ReasonConnect,
+									StateData#statedata.failed), StateData)
 					end;
 				{error, ReasonPort} ->
 					m3ua_sctp:close(Socket),
@@ -211,7 +215,8 @@ connecting({timeout, retry}, connect, #statedata{options = LocalOptions,
 					#{layer => m3ua, ep => self(), name => Name,
 					options => LocalOptions}),
 			attempt_failed(error, open, ReasonOpen,
-					failed_wait(ReasonOpen), StateData)
+					failed_wait(open, ReasonOpen, StateData#statedata.failed),
+					StateData)
 	end;
 connecting(cast, {'M-SCTP_RELEASE', request, Ref, From},
 		#statedata{socket = Socket} = StateData) ->
@@ -425,6 +430,7 @@ handle_connect(AssocChange, #statedata{socket = Socket,
 				ok ->
 					link(Fsm),
 					connected_after(StateData),
+					ok = m3ua_status:endpoint(#{failed => 0}),
 					NewStateData = StateData#statedata{fsm = Fsm,
 							receiver = undefined, failed = 0},
 					{next_state, connected, NewStateData};
@@ -475,6 +481,7 @@ attempt_failed(Level, Stage, Reason, Wait, #statedata{failed = Failed,
 		_ ->
 			?LOG_DEBUG("Connect failed, trying again", Meta)
 	end,
+	ok = m3ua_status:endpoint(#{failed => Failed + 1}),
 	NewStateData = StateData#statedata{socket = undefined,
 			receiver = undefined, local_addr = undefined,
 			local_port = undefined, failed = Failed + 1},
@@ -483,16 +490,20 @@ attempt_failed(Level, Stage, Reason, Wait, #statedata{failed = Failed,
 
 %% @hidden
 %% 	The wait after a socket that would not open or a connect call that
-%% 	failed. An endpoint with a fixed local port that connects again the
-%% 	moment its association has ended finds that association still being
-%% 	torn down, and is told eaddrnotavail by the connect call, or
-%% 	eaddrinuse by the bind: that clears within a second or so and is
-%% 	tried again after one. Anything else waits ERROR_WAIT.
-failed_wait(eaddrnotavail) ->
+%% 	failed, `Failed' attempts having failed before it. An endpoint with
+%% 	a fixed local port that connects again the moment its association
+%% 	has ended finds that association still being torn down, and is told
+%% 	eaddrnotavail by the connect call, or eaddrinuse by the bind: that
+%% 	clears within a second or so and is tried again after one, for
+%% 	BUSY_TRIES attempts. Past them the address is held by something that
+%% 	is not going away -- another endpoint given the same port -- and it
+%% 	waits ERROR_WAIT like anything else. eaddrnotavail from the bind is
+%% 	not this: the address asked for is not one this host has.
+failed_wait(connect_init, eaddrnotavail, Failed) when Failed < ?BUSY_TRIES ->
 	?BUSY_WAIT;
-failed_wait(eaddrinuse) ->
+failed_wait(open, eaddrinuse, Failed) when Failed < ?BUSY_TRIES ->
 	?BUSY_WAIT;
-failed_wait(_Reason) ->
+failed_wait(_Stage, _Reason, _Failed) ->
 	?ERROR_WAIT.
 
 %% @hidden
