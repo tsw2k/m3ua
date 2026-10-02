@@ -113,7 +113,7 @@ all() ->
 			connect_options, connect_device, sctp_timers, stop_endpoint, lm_stray,
 			reconnect_in_place,
 			listen_not_accepted, connect_not_taken, connect_retry_asked,
-			connect_open_fails,
+			connect_open_fails, connect_port_busy,
 			asp_states,
 			endpoint_gives_up, lm_restart, callback_raised, asp_up_ack_unexpected,
 			asp_drst_dupu, asp_restricted_congestion,
@@ -2165,6 +2165,39 @@ connect_retry_asked(_Config) ->
 	%% The same process throughout: nothing it was asked killed it.
 	true = is_process_alive(EP),
 	ok = m3ua:stop(EP),
+	ok = gen_sctp:close(Peer).
+
+connect_port_busy() ->
+	[{userdata, [{doc, "A connect endpoint with a fixed local port whose address is still held by another association tries again within a second or so, not after the error wait."}]}].
+
+connect_port_busy(_Config) ->
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	ok = gen_sctp:listen(Peer, true),
+	{ok, {_, Port}} = inet:sockname(Peer),
+	{ok, EP1} = m3ua:start(callback(make_ref()), 0,
+			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
+	ok = comm_up(Peer),
+	[_] = assoc(EP1, 40),
+	{_, client, asp, {_, LocalPort}, _} = m3ua:get_ep(EP1),
+	%% The same local port to the same peer: an association with that
+	%% address is already up, and every attempt is refused, at once.
+	{ok, EP2} = m3ua:start(callback(make_ref()), LocalPort,
+			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
+	ct:sleep(1500),
+	[] = m3ua:get_assoc(EP2),
+	%% The first goes, as an association ended by the gateway does, and
+	%% the second is in within seconds rather than thirty.
+	ok = m3ua:stop(EP1),
+	ok = receive
+		{sctp, Peer, _, _, {_, #sctp_assoc_change{state = comm_up}}} ->
+			ok
+	after
+		5000 ->
+			still_waiting
+	end,
+	[_] = assoc(EP2, 40),
+	true = is_process_alive(EP2),
+	ok = m3ua:stop(EP2),
 	ok = gen_sctp:close(Peer).
 
 connect_open_fails() ->

@@ -63,6 +63,9 @@
 
 -define(RETRY_WAIT, 8000).
 -define(ERROR_WAIT, 30000).
+%% The local address and port are still held by the association before
+%% this one, closing; see failed_wait/1.
+-define(BUSY_WAIT, 1000).
 
 %%----------------------------------------------------------------------
 %%  The m3ua_connect_fsm gen_statem callbacks
@@ -192,7 +195,7 @@ connecting({timeout, retry}, connect, #statedata{options = LocalOptions,
 									options => ConnectOptions}),
 							m3ua_sctp:close(Socket),
 							attempt_failed(warning, connect_init, ReasonConnect,
-									?ERROR_WAIT, StateData)
+									failed_wait(ReasonConnect), StateData)
 					end;
 				{error, ReasonPort} ->
 					m3ua_sctp:close(Socket),
@@ -207,7 +210,8 @@ connecting({timeout, retry}, connect, #statedata{options = LocalOptions,
 			?LOG_DEBUG("Socket not opened",
 					#{layer => m3ua, ep => self(), name => Name,
 					options => LocalOptions}),
-			attempt_failed(error, open, ReasonOpen, ?ERROR_WAIT, StateData)
+			attempt_failed(error, open, ReasonOpen,
+					failed_wait(ReasonOpen), StateData)
 	end;
 connecting(cast, {'M-SCTP_RELEASE', request, Ref, From},
 		#statedata{socket = Socket} = StateData) ->
@@ -476,6 +480,20 @@ attempt_failed(Level, Stage, Reason, Wait, #statedata{failed = Failed,
 			local_port = undefined, failed = Failed + 1},
 	{next_state, connecting, NewStateData,
 			{{timeout, retry}, Wait, connect}}.
+
+%% @hidden
+%% 	The wait after a socket that would not open or a connect call that
+%% 	failed. An endpoint with a fixed local port that connects again the
+%% 	moment its association has ended finds that association still being
+%% 	torn down, and is told eaddrnotavail by the connect call, or
+%% 	eaddrinuse by the bind: that clears within a second or so and is
+%% 	tried again after one. Anything else waits ERROR_WAIT.
+failed_wait(eaddrnotavail) ->
+	?BUSY_WAIT;
+failed_wait(eaddrinuse) ->
+	?BUSY_WAIT;
+failed_wait(_Reason) ->
+	?ERROR_WAIT.
 
 %% @hidden
 connected_after(#statedata{failed = 0}) ->
