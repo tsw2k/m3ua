@@ -81,7 +81,8 @@ init_per_testcase(TC, Config)
 		TC == mtp_cast; TC == asp_up_indication;
 		TC == asp_active_indication; TC == asp_inactive_indication;
 		TC == asp_down_indication; TC == sg_state_active;
-		TC == as_state_active; TC == sg_state_down; TC == as_state_down ->
+		TC == as_state_active; TC == sg_state_down; TC == as_state_down;
+		TC == asp_sgp_deregister ->
 	case is_alive() of
 			true ->
 				Config;
@@ -122,7 +123,7 @@ all() ->
 			sgp_transfer_rc, data_nodelay, sgp_static_register,
 			lifecycle_contained,
 			asp_sgp_one_node, copy_messages, asp_register_down, asp_asptm_rc,
-			asp_sgp_asptm_rc,
+			asp_sgp_asptm_rc, asp_return_rc, asp_sgp_deregister,
 			sgp_register_down, asp_request_in_place, sgp_as_pending,
 			sgp_as_pending_on_loss, sgp_override_takeover, asp_alternate_active,
 			sgp_deregister_local, sgp_deregister_named, asp_deregister,
@@ -823,6 +824,91 @@ asp_sgp_asptm_rc(_Config) ->
 	false = maps:is_key(error_in, ClientCounts),
 	ok = m3ua:stop(ClientEP),
 	ok = m3ua:stop(ServerEP).
+
+asp_return_rc() ->
+	[{userdata, [{doc, "An active ASP with {asptm_rc, true} that is sent an ASP UP ACK it did not ask for answers with an ERR and asks to be active again, naming its routing context (RFC 4666 4.3.4.1)."}]}].
+
+asp_return_rc(_Config) ->
+	{Peer, PeerAssoc, EP, Assoc} = raw_sg(callback(make_ref()),
+			[{static, true}, {asptm_rc, true}]),
+	try
+		Self = self(),
+		spawn_link(fun() -> Self ! {up, m3ua:asp_up(EP, Assoc)} end),
+		#m3ua{} = raw_expect(Peer, ?ASPSMMessage, ?ASPSMASPUP),
+		ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUPACK)),
+		receive {up, ok} -> ok after 2000 -> ct:fail(asp_up) end,
+		RC = unused_rc(),
+		{ok, RC} = m3ua:register(EP, Assoc, RC, undefined,
+				[{rand:uniform(16383), [], []}], loadshare),
+		spawn_link(fun() -> Self ! {active, m3ua:asp_active(EP, Assoc)} end),
+		#m3ua{} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPAC),
+		ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPTMMessage, ?ASPTMASPACACK)),
+		receive {active, ok} -> ok after 2000 -> ct:fail(asp_active) end,
+		%% Unasked for: the asp is inactive by it, says so, and asks to
+		%% go back, with the context it had.
+		ok = raw_put(Peer, PeerAssoc, raw_msg(?ASPSMMessage, ?ASPSMASPUPACK)),
+		#m3ua{} = raw_expect(Peer, ?MGMTMessage, ?MGMTError),
+		#m3ua{params = Again} = raw_expect(Peer, ?ASPTMMessage, ?ASPTMASPAC),
+		[RC] = rcs(Again)
+	after
+		_ = m3ua:stop(EP),
+		_ = gen_sctp:close(Peer)
+	end.
+
+asp_sgp_deregister() ->
+	[{userdata, [{doc, "An ASP on another node deregisters at the fork's own gateway: DEREG REQ and RSP, the routing key gone at both ends, and the application server the REG REQ made removed with it."}]}].
+
+asp_sgp_deregister(_Config) ->
+	%% Two nodes, so that the gateway's m3ua_as and the asp's m3ua_asp
+	%% are tables of their own, as they are in service.
+	RefS = make_ref(),
+	{ok, ServerEP} = m3ua:start(remote_cb(RefS), 0,
+			[{role, sgp}, {ip, {127,0,0,1}}]),
+	{_, server, sgp, {_, Port}} = m3ua:get_ep(ServerEP),
+	{ok, AsPeer, AsNode} = as_node(),
+	{ok, _} = rpc:call(AsNode, m3ua_app, install, [[AsNode]]),
+	ok = rpc:call(AsNode, application, start, [inets]),
+	ok = rpc:call(AsNode, application, start, [m3ua]),
+	RefC = make_ref(),
+	{ok, ClientEP} = rpc:call(AsNode, m3ua, start,
+			[remote_cb(RefC), 0, [{role, asp}, {connect, {127,0,0,1}, Port, []}]]),
+	_Sgp = wait(RefS),
+	_Asp = wait(RefC),
+	[Assoc] = m3ua:get_assoc(ClientEP),
+	ok = rpc:call(AsNode, m3ua, asp_up, [ClientEP, Assoc]),
+	Keys = [{rand:uniform(16383), [], []}],
+	{ok, RC} = rpc:call(AsNode, m3ua, register,
+			[ClientEP, Assoc, undefined, undefined, Keys, loadshare]),
+	AspKeys = fun() ->
+			rpc:call(AsNode, mnesia, dirty_match_object,
+					[m3ua_asp, #m3ua_asp{fsm = '_', rc = RC, rk = '_'}])
+	end,
+	[_] = AspKeys(),
+	[#m3ua_as{}] = mnesia:dirty_read(m3ua_as, RC),
+	ok = rpc:call(AsNode, m3ua, deregister, [ClientEP, Assoc, RC]),
+	[] = AspKeys(),
+	%% Made by the REG REQ, the server goes with its last asp.
+	removed = removed_as(RC, 40),
+	{ok, #{dereg_out := 1, dereg_rsp_in := 1}} =
+			rpc:call(AsNode, m3ua, getcount, [ClientEP, Assoc]),
+	[ServerAssoc] = m3ua:get_assoc(ServerEP),
+	{ok, #{dereg_in := 1, dereg_rsp_out := 1}} =
+			m3ua:getcount(ServerEP, ServerAssoc),
+	ok = rpc:call(AsNode, m3ua, stop, [ClientEP]),
+	ok = m3ua:stop(ServerEP),
+	ok = peer:stop(AsPeer).
+
+%% @hidden
+removed_as(_RC, 0) ->
+	still_there;
+removed_as(RC, N) ->
+	case mnesia:dirty_read(m3ua_as, RC) of
+		[] ->
+			removed;
+		[_] ->
+			ct:sleep(50),
+			removed_as(RC, N - 1)
+	end.
 
 copy_messages() ->
 	[{userdata, [{doc, "With {copy, MFA} every M3UA message received or sent is handed to the function whole, and one that raises costs the copy, not the association."}]}].
