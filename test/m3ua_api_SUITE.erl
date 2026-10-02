@@ -875,6 +875,7 @@ asp_sgp_deregister(_Config) ->
 	_Sgp = wait(RefS),
 	_Asp = wait(RefC),
 	[Assoc] = m3ua:get_assoc(ClientEP),
+	down = rpc:call(AsNode, ?MODULE, known, [ClientEP, Assoc, 40]),
 	ok = rpc:call(AsNode, m3ua, asp_up, [ClientEP, Assoc]),
 	Keys = [{rand:uniform(16383), [], []}],
 	{ok, RC} = rpc:call(AsNode, m3ua, register,
