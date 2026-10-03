@@ -102,7 +102,7 @@ association:
 - a connect endpoint whose association ends connects again as the same
   process, instead of dying and being restarted;
 - a connect endpoint whose connect fails -- the INIT unanswered after its
-  retransmissions, or refused -- tries again 8 s later, or 30 s later where
+  retransmissions, or refused -- tries again 2 s later, or 30 s later where
   the socket could not be opened or the connect call itself failed, with no
   backoff and no end. Where the local address is still held by the
   association before, closing -- a fixed local port reconnecting at once,

@@ -61,7 +61,7 @@
 		copy :: undefined | {module(), atom(), term()},
 		callback :: {Module :: atom(), State :: term()}}).
 
--define(RETRY_WAIT, 8000).
+-define(RETRY_WAIT, 2000).
 -define(ERROR_WAIT, 30000).
 %% The local address and port are still held by the association before
 %% this one, closing; see failed_wait/3. Tried this many times in a row
