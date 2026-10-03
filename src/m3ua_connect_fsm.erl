@@ -55,14 +55,19 @@
 		%% Associations that came up and have ended since this
 		%% endpoint started, for m3ua_status.
 		ended = 0 :: non_neg_integer(),
-		%% Attempts to connect that have failed in a row.
+		%% Attempts to connect that have failed in a row, and of
+		%% them the last ones that found the address still taken.
 		failed = 0 :: non_neg_integer(),
+		busy = 0 :: non_neg_integer(),
 		%% m3ua:start/3's `{copy, MFA}', for the state machines.
 		copy :: undefined | {module(), atom(), term()},
 		callback :: {Module :: atom(), State :: term()}}).
 
 -define(RETRY_WAIT, 2000).
 -define(ERROR_WAIT, 30000).
+%% An association that came up and could not be handed to a state
+%% machine; see not_connected/4.
+-define(HANDOVER_WAIT, 8000).
 %% The local address and port are still held by the association before
 %% this one, closing; see failed_wait/3. Tried this many times in a row
 %% at most, then ERROR_WAIT.
@@ -199,7 +204,7 @@ connecting({timeout, retry}, connect, #statedata{options = LocalOptions,
 							m3ua_sctp:close(Socket),
 							attempt_failed(warning, connect_init, ReasonConnect,
 									failed_wait(connect_init, ReasonConnect,
-									StateData#statedata.failed), StateData)
+									StateData#statedata.busy), StateData)
 					end;
 				{error, ReasonPort} ->
 					m3ua_sctp:close(Socket),
@@ -215,7 +220,7 @@ connecting({timeout, retry}, connect, #statedata{options = LocalOptions,
 					#{layer => m3ua, ep => self(), name => Name,
 					options => LocalOptions}),
 			attempt_failed(error, open, ReasonOpen,
-					failed_wait(open, ReasonOpen, StateData#statedata.failed),
+					failed_wait(open, ReasonOpen, StateData#statedata.busy),
 					StateData)
 	end;
 connecting(cast, {'M-SCTP_RELEASE', request, Ref, From},
@@ -432,7 +437,7 @@ handle_connect(AssocChange, #statedata{socket = Socket,
 					connected_after(StateData),
 					ok = m3ua_status:endpoint(#{failed => 0}),
 					NewStateData = StateData#statedata{fsm = Fsm,
-							receiver = undefined, failed = 0},
+							receiver = undefined, failed = 0, busy = 0},
 					{next_state, connected, NewStateData};
 				{error, Reason} ->
 					_ = supervisor:terminate_child(Sup, Fsm),
@@ -451,18 +456,19 @@ handle_connect(AssocChange, #statedata{socket = Socket,
 %% 	run, `closed' from handing the socket over, in a case that stops
 %% 	the endpoint straight after starting it. m3ua_listen_fsm's
 %% 	not_accepted/6 is the same on the listening side.
+%%
+%% 	It is a failed attempt like the others, said and counted by
+%% 	attempt_failed/5 -- once at warning, then at debug -- and waited
+%% 	HANDOVER_WAIT: a callback that refuses is unlikely to take the next
+%% 	association two seconds later, and each try is a whole association
+%% 	set up and torn down at the peer.
 not_connected(Stage, Reason, #sctp_assoc_change{assoc_id = Assoc},
-		#statedata{socket = Socket, remote_addr = Address,
-		remote_port = Port} = StateData) ->
+		#statedata{socket = Socket} = StateData) ->
 	_ = m3ua_sctp:close(Socket),
-	?LOG_WARNING("Association not taken on, connecting again",
-			#{layer => m3ua, ep => self(), assoc => Assoc,
-			remote => {Address, Port}, stage => Stage, reason => Reason}),
-	NewStateData = ended(StateData#statedata{socket = undefined,
-			receiver = undefined, assoc = undefined, local_addr = undefined,
-			local_port = undefined}),
-	{next_state, connecting, NewStateData,
-			{{timeout, retry}, ?RETRY_WAIT, connect}}.
+	?LOG_DEBUG("Association not taken on",
+			#{layer => m3ua, ep => self(), assoc => Assoc, stage => Stage}),
+	NewStateData = ended(StateData#statedata{assoc = undefined}),
+	attempt_failed(warning, Stage, Reason, ?HANDOVER_WAIT, NewStateData).
 
 %% @hidden
 %% 	An attempt to connect that failed at `Stage': try again after
@@ -471,7 +477,8 @@ not_connected(Stage, Reason, #sctp_assoc_change{assoc_id = Assoc},
 %% 	otherwise say the same thing two hundred times -- and at notice
 %% 	once an attempt succeeds (connected_after/1).
 attempt_failed(Level, Stage, Reason, Wait, #statedata{failed = Failed,
-		name = Name, remote_addr = Address, remote_port = Port} = StateData) ->
+		busy = Busy, name = Name, remote_addr = Address,
+		remote_port = Port} = StateData) ->
 	Meta = #{layer => m3ua, ep => self(), name => Name,
 			remote => {Address, Port}, stage => Stage, reason => Reason,
 			failed => Failed + 1, wait => Wait},
@@ -482,28 +489,36 @@ attempt_failed(Level, Stage, Reason, Wait, #statedata{failed = Failed,
 			?LOG_DEBUG("Connect failed, trying again", Meta)
 	end,
 	ok = m3ua_status:endpoint(#{failed => Failed + 1}),
+	NewBusy = case Wait of
+		?BUSY_WAIT ->
+			Busy + 1;
+		_ ->
+			0
+	end,
 	NewStateData = StateData#statedata{socket = undefined,
 			receiver = undefined, local_addr = undefined,
-			local_port = undefined, failed = Failed + 1},
+			local_port = undefined, failed = Failed + 1, busy = NewBusy},
 	{next_state, connecting, NewStateData,
 			{{timeout, retry}, Wait, connect}}.
 
 %% @hidden
 %% 	The wait after a socket that would not open or a connect call that
-%% 	failed, `Failed' attempts having failed before it. An endpoint with
-%% 	a fixed local port that connects again the moment its association
-%% 	has ended finds that association still being torn down, and is told
-%% 	eaddrnotavail by the connect call, or eaddrinuse by the bind: that
-%% 	clears within a second or so and is tried again after one, for
-%% 	BUSY_TRIES attempts. Past them the address is held by something that
-%% 	is not going away -- another endpoint given the same port -- and it
-%% 	waits ERROR_WAIT like anything else. eaddrnotavail from the bind is
-%% 	not this: the address asked for is not one this host has.
-failed_wait(connect_init, eaddrnotavail, Failed) when Failed < ?BUSY_TRIES ->
+%% 	failed, the `Busy' attempts just before it having found the address
+%% 	taken. An endpoint with a fixed local port that connects again the
+%% 	moment its association has ended finds that association still being
+%% 	torn down, and is told eaddrnotavail by the connect call, or
+%% 	eaddrinuse by the bind: that clears within a second or so and is
+%% 	tried again after one, for BUSY_TRIES attempts in a row. Other
+%% 	failures before them do not count. Past them the address is held by
+%% 	something that is not going away -- another endpoint given the same
+%% 	port -- and it waits ERROR_WAIT like anything else. eaddrnotavail
+%% 	from the bind is not this: the address asked for is not one this
+%% 	host has.
+failed_wait(connect_init, eaddrnotavail, Busy) when Busy < ?BUSY_TRIES ->
 	?BUSY_WAIT;
-failed_wait(open, eaddrinuse, Failed) when Failed < ?BUSY_TRIES ->
+failed_wait(open, eaddrinuse, Busy) when Busy < ?BUSY_TRIES ->
 	?BUSY_WAIT;
-failed_wait(_Stage, _Reason, _Failed) ->
+failed_wait(_Stage, _Reason, _Busy) ->
 	?ERROR_WAIT.
 
 %% @hidden

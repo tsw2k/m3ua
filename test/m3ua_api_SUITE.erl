@@ -113,7 +113,8 @@ all() ->
 			connect_options, connect_device, sctp_timers, stop_endpoint, lm_stray,
 			reconnect_in_place,
 			listen_not_accepted, connect_not_taken, connect_retry_asked,
-			connect_open_fails, connect_port_busy,
+			connect_open_fails, connect_port_busy, connect_busy_bounded,
+			connect_bad_ip,
 			asp_states,
 			endpoint_gives_up, lm_restart, callback_raised, asp_up_ack_unexpected,
 			asp_drst_dupu, asp_restricted_congestion,
@@ -2211,6 +2212,46 @@ connect_port_busy(_Config) ->
 	0 = failed(EP2),
 	ok = m3ua:stop(EP2),
 	ok = gen_sctp:close(Peer).
+
+connect_busy_bounded() ->
+	[{userdata, [{doc, "An address that stays taken is tried again after 1 s ten times in a row, and then only after the error wait."}]}].
+
+connect_busy_bounded(_Config) ->
+	{ok, Peer} = gen_sctp:open([{active, true}, {ip, {127,0,0,1}}]),
+	ok = gen_sctp:listen(Peer, true),
+	{ok, {_, Port}} = inet:sockname(Peer),
+	{ok, EP1} = m3ua:start(callback(make_ref()), 0,
+			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
+	ok = comm_up(Peer),
+	[_] = assoc(EP1, 40),
+	{_, client, asp, {_, LocalPort}, _} = m3ua:get_ep(EP1),
+	%% The first stays up: the second's address is taken for good.
+	{ok, EP2} = m3ua:start(callback(make_ref()), LocalPort,
+			[{role, asp}, {connect, {127,0,0,1}, Port, []}]),
+	%% Eleven attempts in about ten seconds -- the first and ten more,
+	%% a second apart -- and then none for thirty.
+	ct:sleep(13000),
+	Failed = failed(EP2),
+	true = Failed >= 11,
+	ct:sleep(3000),
+	Failed = failed(EP2),
+	ok = m3ua:stop(EP2),
+	ok = m3ua:stop(EP1),
+	ok = gen_sctp:close(Peer).
+
+connect_bad_ip() ->
+	[{userdata, [{doc, "A connect endpoint given a local address the host does not have waits the error wait between attempts, not the 1 s of an address still taken."}]}].
+
+connect_bad_ip(_Config) ->
+	%% 192.0.2.1 is TEST-NET-1, an address no host here has: the bind
+	%% answers eaddrnotavail.
+	{ok, EP} = m3ua:start(callback(make_ref()), 0,
+			[{role, asp}, {ip, {192,0,2,1}},
+			{connect, {127,0,0,1}, 9, []}]),
+	ct:sleep(2500),
+	1 = failed(EP),
+	true = is_process_alive(EP),
+	ok = m3ua:stop(EP).
 
 connect_open_fails() ->
 	[{userdata, [{doc, "A connect endpoint whose socket cannot be opened waits and tries again, rather than stopping until its supervisor gives it up."}]}].
