@@ -2244,7 +2244,16 @@ connect_bad_ip() ->
 
 connect_bad_ip(_Config) ->
 	%% 192.0.2.1 is TEST-NET-1, an address no host here has: the bind
-	%% answers eaddrnotavail.
+	%% answers eaddrnotavail -- unless the host lets anything be bound,
+	%% when the failure comes later and slower and this proves nothing.
+	case file:read_file("/proc/sys/net/ipv4/ip_nonlocal_bind") of
+		{ok, <<"1", _/binary>>} ->
+			{skip, ip_nonlocal_bind};
+		_ ->
+			connect_bad_ip1()
+	end.
+%% @hidden
+connect_bad_ip1() ->
 	{ok, EP} = m3ua:start(callback(make_ref()), 0,
 			[{role, asp}, {ip, {192,0,2,1}},
 			{connect, {127,0,0,1}, 9, []}]),

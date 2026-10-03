@@ -69,7 +69,7 @@
 %% machine; see not_connected/4.
 -define(HANDOVER_WAIT, 8000).
 %% The local address and port are still held by the association before
-%% this one, closing; see failed_wait/3. Tried this many times in a row
+%% this one, closing; see call_failed/4. Tried this many times in a row
 %% at most, then ERROR_WAIT.
 -define(BUSY_WAIT, 1000).
 -define(BUSY_TRIES, 10).
@@ -202,9 +202,8 @@ connecting({timeout, retry}, connect, #statedata{options = LocalOptions,
 									#{layer => m3ua, ep => self(), name => Name,
 									options => ConnectOptions}),
 							m3ua_sctp:close(Socket),
-							attempt_failed(warning, connect_init, ReasonConnect,
-									failed_wait(connect_init, ReasonConnect,
-									StateData#statedata.busy), StateData)
+							call_failed(warning, connect_init, ReasonConnect,
+									StateData)
 					end;
 				{error, ReasonPort} ->
 					m3ua_sctp:close(Socket),
@@ -219,9 +218,7 @@ connecting({timeout, retry}, connect, #statedata{options = LocalOptions,
 			?LOG_DEBUG("Socket not opened",
 					#{layer => m3ua, ep => self(), name => Name,
 					options => LocalOptions}),
-			attempt_failed(error, open, ReasonOpen,
-					failed_wait(open, ReasonOpen, StateData#statedata.busy),
-					StateData)
+			call_failed(error, open, ReasonOpen, StateData)
 	end;
 connecting(cast, {'M-SCTP_RELEASE', request, Ref, From},
 		#statedata{socket = Socket} = StateData) ->
@@ -476,23 +473,30 @@ not_connected(Stage, Reason, #sctp_assoc_change{assoc_id = Assoc},
 %% 	count, while it goes on failing -- a peer down for an hour would
 %% 	otherwise say the same thing two hundred times -- and at notice
 %% 	once an attempt succeeds (connected_after/1).
-attempt_failed(Level, Stage, Reason, Wait, #statedata{failed = Failed,
+attempt_failed(Level, Stage, Reason, Wait, StateData) ->
+	attempt_failed(Level, Stage, Reason, Wait, false, StateData).
+%% @hidden
+%% 	`Taken': this attempt found the local address still taken. Those
+%% 	in a row are counted in `busy', which nothing else touches but an
+%% 	attempt that failed otherwise, or one that succeeded.
+attempt_failed(Level, Stage, Reason, Wait, Taken, #statedata{failed = Failed,
 		busy = Busy, name = Name, remote_addr = Address,
 		remote_port = Port} = StateData) ->
 	Meta = #{layer => m3ua, ep => self(), name => Name,
 			remote => {Address, Port}, stage => Stage, reason => Reason,
 			failed => Failed + 1, wait => Wait},
+	Text = failed_text(Stage),
 	case Failed of
 		0 ->
-			?LOG(Level, "Connect failed, trying again", Meta);
+			?LOG(Level, Text, Meta);
 		_ ->
-			?LOG_DEBUG("Connect failed, trying again", Meta)
+			?LOG_DEBUG(Text, Meta)
 	end,
 	ok = m3ua_status:endpoint(#{failed => Failed + 1}),
-	NewBusy = case Wait of
-		?BUSY_WAIT ->
+	NewBusy = case Taken of
+		true ->
 			Busy + 1;
-		_ ->
+		false ->
 			0
 	end,
 	NewStateData = StateData#statedata{socket = undefined,
@@ -502,24 +506,68 @@ attempt_failed(Level, Stage, Reason, Wait, #statedata{failed = Failed,
 			{{timeout, retry}, Wait, connect}}.
 
 %% @hidden
-%% 	The wait after a socket that would not open or a connect call that
-%% 	failed, the `Busy' attempts just before it having found the address
-%% 	taken. An endpoint with a fixed local port that connects again the
-%% 	moment its association has ended finds that association still being
-%% 	torn down, and is told eaddrnotavail by the connect call, or
-%% 	eaddrinuse by the bind: that clears within a second or so and is
-%% 	tried again after one, for BUSY_TRIES attempts in a row. Other
-%% 	failures before them do not count. Past them the address is held by
-%% 	something that is not going away -- another endpoint given the same
-%% 	port -- and it waits ERROR_WAIT like anything else. eaddrnotavail
-%% 	from the bind is not this: the address asked for is not one this
-%% 	host has.
-failed_wait(connect_init, eaddrnotavail, Busy) when Busy < ?BUSY_TRIES ->
-	?BUSY_WAIT;
-failed_wait(open, eaddrinuse, Busy) when Busy < ?BUSY_TRIES ->
-	?BUSY_WAIT;
-failed_wait(_Stage, _Reason, _Busy) ->
-	?ERROR_WAIT.
+%% 	The association came up and was refused here, which is not a
+%% 	connect that failed, and is said as what it was.
+failed_text(Stage) when Stage == start_child;
+		Stage == controlling_process ->
+	"Association not taken on, trying again";
+failed_text(_Stage) ->
+	"Connect failed, trying again".
+
+%% @hidden
+%% 	A socket that would not open or a connect call that failed. An
+%% 	endpoint with a fixed local port that connects again the moment
+%% 	its association has ended finds that association still being torn
+%% 	down, and is told eaddrnotavail by the connect call, or eaddrinuse
+%% 	by the bind: that clears within a second or so and is tried again
+%% 	after one, for BUSY_TRIES attempts in a row. Past them the address
+%% 	is held by something that is not going away -- another endpoint
+%% 	given the same port -- and it waits ERROR_WAIT like anything else,
+%% 	for as long as it stays taken. Anything else waits ERROR_WAIT too.
+call_failed(Level, Stage, Reason, #statedata{busy = Busy} = StateData) ->
+	Taken = taken(Stage, Reason, StateData),
+	Wait = case Taken andalso Busy < ?BUSY_TRIES of
+		true ->
+			?BUSY_WAIT;
+		false ->
+			?ERROR_WAIT
+	end,
+	attempt_failed(Level, Stage, Reason, Wait, Taken, StateData).
+
+%% @hidden
+%% 	Whether a failure is the local address still taken. eaddrnotavail
+%% 	from the bind is not: the address asked for is not one this host
+%% 	has. Nor is it from the connect call when the endpoint binds an
+%% 	address the host lacks, which net.ipv4.ip_nonlocal_bind lets
+%% 	through the bind.
+taken(open, eaddrinuse, #statedata{}) ->
+	true;
+taken(connect_init, eaddrnotavail, #statedata{options = Options}) ->
+	local_address(Options);
+taken(_Stage, _Reason, #statedata{}) ->
+	false.
+
+%% @hidden
+local_address(Options) ->
+	case lists:keyfind(ip, 1, Options) of
+		false ->
+			true;
+		{ip, any} ->
+			true;
+		{ip, {0, 0, 0, 0}} ->
+			true;
+		{ip, {0, 0, 0, 0, 0, 0, 0, 0}} ->
+			true;
+		{ip, Address} ->
+			case inet:getifaddrs() of
+				{ok, IfAddrs} ->
+					lists:any(fun({_Name, IfOpts}) ->
+								lists:member({addr, Address}, IfOpts)
+							end, IfAddrs);
+				{error, _} ->
+					true
+			end
+	end.
 
 %% @hidden
 connected_after(#statedata{failed = 0}) ->
